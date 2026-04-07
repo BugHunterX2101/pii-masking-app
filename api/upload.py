@@ -1,176 +1,234 @@
-from fastapi import FastAPI, UploadFile, File, HTTPException
-from fastapi.responses import JSONResponse
-from fastapi.middleware.cors import CORSMiddleware
-import shutil
+"""
+PII Masking API - Image upload and processing endpoint
+Fixed issues:
+  - Lazy OCR reader initialization (no module-level crash)
+  - Returns image binary directly instead of a filename
+  - Robust multipart parsing
+  - Improved PII patterns (fewer false positives)
+  - Detection report included in response headers
+  - Added PAN card, passport, credit card patterns
+"""
+from http.server import BaseHTTPRequestHandler
 import os
 import uuid
-from PIL import Image, ImageDraw
-import easyocr
-import cv2
-import numpy as np
 import re
-from http.server import BaseHTTPRequestHandler
-from io import BytesIO
 import json
+import mimetypes
+import cgi
+import io
 
-# Create directories for storing images
-UPLOAD_DIR = "/tmp/uploads"
-PROCESSED_DIR = "/tmp/processed"
+UPLOAD_DIR = "/tmp/pii_uploads"
+PROCESSED_DIR = "/tmp/pii_processed"
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 os.makedirs(PROCESSED_DIR, exist_ok=True)
 
-# Initialize OCR reader
-reader = easyocr.Reader(['en'])
-
-# PII detection patterns
+# -------------------------------------------------------------------
+# PII detection patterns — compiled once
+# -------------------------------------------------------------------
 PII_PATTERNS = {
-    'aadhaar': r'\d{4}\s\d{4}\s\d{4}',  # Aadhaar number pattern (e.g., 1234 5678 9012)
-    'phone': r'\+?\d{10,12}',  # Phone number pattern
-    'email': r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}',  # Email pattern
-    'date': r'\d{2}[/.-]\d{2}[/.-]\d{2,4}',  # Date pattern (DD/MM/YYYY or similar)
+    "aadhaar":      re.compile(r'\b\d{4}\s\d{4}\s\d{4}\b'),
+    "pan_card":     re.compile(r'\b[A-Z]{5}[0-9]{4}[A-Z]\b'),
+    "passport":     re.compile(r'\b[A-Z][0-9]{7}\b'),
+    "phone":        re.compile(r'(?<!\d)(\+?91[\s\-]?)?[6-9]\d{9}(?!\d)'),
+    "email":        re.compile(r'\b[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}\b'),
+    "date_of_birth": re.compile(r'\b\d{2}[/\-\.]\d{2}[/\-\.]\d{4}\b'),
+    "credit_card":  re.compile(r'\b(?:\d[ \-]?){13,16}\b'),
+    "pincode":      re.compile(r'\b[1-9]\d{5}\b'),
+    "vehicle_reg":  re.compile(r'\b[A-Z]{2}\s?\d{2}\s?[A-Z]{1,2}\s?\d{4}\b'),
 }
 
-# Keywords that might indicate PII
-NAME_KEYWORDS = ['name', 'naam']
-ADDRESS_KEYWORDS = ['address', 'addr', 'residence', 'pata']
-DOB_KEYWORDS = ['birth', 'dob', 'born', 'janm']
+# Keyword-based detection (whole-word matching to avoid 'filename' false positives)
+KEYWORD_GROUPS = {
+    "name_field":    re.compile(r'\b(name|naam|full name)\b', re.I),
+    "address_field": re.compile(r'\b(address|addr|residence|pata|locality)\b', re.I),
+    "dob_field":     re.compile(r'\b(date of birth|dob|born|janm|d\.o\.b)\b', re.I),
+    "gender_field":  re.compile(r'\b(male|female|gender|sex)\b', re.I),
+}
 
-def is_pii(text):
-    """Check if the text contains PII based on patterns and keywords"""
-    text = text.lower()
-    
-    # Check for Aadhaar number, phone, email, and date patterns
-    for pattern in PII_PATTERNS.values():
-        if re.search(pattern, text):
-            return True
-    
-    # Check for name indicators
-    for keyword in NAME_KEYWORDS:
-        if keyword in text:
-            return True
-    
-    # Check for address indicators
-    for keyword in ADDRESS_KEYWORDS:
-        if keyword in text:
-            return True
-    
-    # Check for DOB indicators
-    for keyword in DOB_KEYWORDS:
-        if keyword in text:
-            return True
-    
-    # Additional heuristics can be added here
-    
-    return False
 
-def mask_pii(image_path):
-    # Read the image
-    img = cv2.imread(image_path)
+def detect_pii(text: str) -> dict:
+    """
+    Returns dict with keys: found (bool), types (list), redacted (str)
+    Redacted text has PII replaced with [TYPE_MASKED] tokens.
+    """
+    found_types = []
+    redacted = text
+
+    for name, pattern in PII_PATTERNS.items():
+        if pattern.search(text):
+            found_types.append(name)
+            redacted = pattern.sub(f"[{name.upper()}_MASKED]", redacted)
+
+    for name, pattern in KEYWORD_GROUPS.items():
+        if pattern.search(text):
+            if name not in found_types:
+                found_types.append(name)
+
+    return {
+        "found": len(found_types) > 0,
+        "types": found_types,
+        "redacted": redacted,
+    }
+
+
+def mask_pii_in_image(image_bytes: bytes):
+    """
+    OCR → detect PII → draw black rectangles.
+    Returns (masked_image_bytes, detection_report).
+    Heavy imports are inside the function to avoid Vercel cold-start crashes.
+    """
+    import cv2
+    import numpy as np
+    import easyocr
+
+    # Decode image
+    nparr = np.frombuffer(image_bytes, np.uint8)
+    img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
     if img is None:
-        raise Exception("Could not read the image")
-    
-    # Convert to RGB for EasyOCR
+        raise ValueError("Could not decode image. Ensure the file is a valid image.")
+
     rgb_img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-    
-    # Perform OCR to extract text and bounding boxes
+
+    # Lazy-load OCR (cached at process level for reuse within the same invocation)
+    if not hasattr(mask_pii_in_image, "_reader"):
+        mask_pii_in_image._reader = easyocr.Reader(['en'], gpu=False, verbose=False)
+    reader = mask_pii_in_image._reader
+
     results = reader.readtext(rgb_img)
-    
-    # Create a copy for masking
-    masked_img = img.copy()
-    
-    # Process each detected text region
-    for (bbox, text, prob) in results:
-        # Check if the text contains PII
-        if is_pii(text):
-            # Convert bbox to the format required by cv2.rectangle
-            # bbox is a list of 4 points (top-left, top-right, bottom-right, bottom-left)
-            # We need top-left and bottom-right points for cv2.rectangle
+    masked = img.copy()
+    report = []
+
+    for (bbox, text, confidence) in results:
+        detection = detect_pii(text)
+        if detection["found"]:
             top_left = tuple(map(int, bbox[0]))
             bottom_right = tuple(map(int, bbox[2]))
-            
-            # Draw a black rectangle to mask the PII
-            cv2.rectangle(masked_img, top_left, bottom_right, (0, 0, 0), -1)
-    
-    # Save the masked image
-    output_filename = f"masked_{os.path.basename(image_path)}"
-    output_path = os.path.join(PROCESSED_DIR, output_filename)
-    cv2.imwrite(output_path, masked_img)
-    
-    return output_path, output_filename
+            # Black fill rectangle
+            cv2.rectangle(masked, top_left, bottom_right, (0, 0, 0), -1)
+            report.append({
+                "original_text": text,
+                "pii_types": detection["types"],
+                "confidence": round(float(confidence), 3),
+                "bbox": [list(map(int, p)) for p in bbox],
+            })
+
+    # Encode result back to JPEG
+    success, buffer = cv2.imencode('.jpg', masked, [cv2.IMWRITE_JPEG_QUALITY, 95])
+    if not success:
+        raise ValueError("Failed to encode processed image.")
+
+    return buffer.tobytes(), report
+
+
+def mask_pii_in_text(text: str) -> dict:
+    """Mask PII in plain text and return structured result."""
+    result = detect_pii(text)
+    return {
+        "original": text,
+        "masked": result["redacted"],
+        "pii_found": result["found"],
+        "pii_types": result["types"],
+        "count": len(result["types"]),
+    }
+
+
+# -------------------------------------------------------------------
+# CORS helper
+# -------------------------------------------------------------------
+def _cors_headers(handler_instance):
+    handler_instance.send_header('Access-Control-Allow-Origin', '*')
+    handler_instance.send_header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
+    handler_instance.send_header('Access-Control-Allow-Headers', 'Content-Type, X-Requested-With')
+
 
 class handler(BaseHTTPRequestHandler):
-    def do_POST(self):
-        # Check if the path is correct
-        if self.path != '/api/upload/':
-            self.send_response(404)
-            self.end_headers()
-            return
 
-        # Get content length
-        content_length = int(self.headers['Content-Length'])
-        
-        # Get boundary from Content-Type
-        content_type = self.headers['Content-Type']
-        boundary = content_type.split('=')[1].encode()
-        
-        # Read the form data
-        form_data = self.rfile.read(content_length)
-        
-        # Parse the form data to get the file
-        file_data = None
-        file_name = None
-        
-        # Simple multipart form parsing
-        form_parts = form_data.split(boundary)
-        for part in form_parts:
-            if b'filename=' in part:
-                # Extract filename
-                header_end = part.find(b'\r\n\r\n')
-                if header_end > 0:
-                    header = part[:header_end].decode('utf-8', 'ignore')
-                    filename_match = re.search(r'filename="(.+?)"', header)
-                    if filename_match:
-                        file_name = filename_match.group(1)
-                    
-                    # Extract file data
-                    file_data = part[header_end+4:]
-                    # Remove trailing boundary marker if present
-                    if file_data.endswith(b'--\r\n'):
-                        file_data = file_data[:-4]
-                    elif file_data.endswith(b'\r\n'):
-                        file_data = file_data[:-2]
-        
-        if not file_data or not file_name:
-            self.send_response(400)
-            self.end_headers()
-            self.wfile.write(b'No file uploaded')
+    def do_OPTIONS(self):
+        self.send_response(200)
+        _cors_headers(self)
+        self.end_headers()
+
+    def do_POST(self):
+        # Route: /api/mask-text
+        if 'mask-text' in self.path or 'mask_text' in self.path:
+            self._handle_text_masking()
             return
-        
+        # Route: /api/upload (default)
+        self._handle_image_upload()
+
+    def _handle_text_masking(self):
         try:
-            # Generate unique filename
-            file_extension = os.path.splitext(file_name)[1]
-            unique_filename = f"{uuid.uuid4()}{file_extension}"
-            file_path = os.path.join(UPLOAD_DIR, unique_filename)
-            
-            # Save uploaded file
-            with open(file_path, "wb") as buffer:
-                buffer.write(file_data)
-            
-            # Process the image to mask PII
-            masked_image_path, output_filename = mask_pii(file_path)
-            
-            # Send response
+            length = int(self.headers.get('Content-Length', 0))
+            raw = self.rfile.read(length)
+            body = json.loads(raw.decode('utf-8'))
+            text = body.get('text', '')
+
+            if not text.strip():
+                self._json_error(400, "Field 'text' is required.")
+                return
+
+            result = mask_pii_in_text(text)
+
             self.send_response(200)
-            self.send_header('Content-type', 'application/json')
+            self.send_header('Content-Type', 'application/json')
+            _cors_headers(self)
             self.end_headers()
-            
-            response = json.dumps({"filename": output_filename})
-            self.wfile.write(response.encode())
-            
-        except Exception as e:
-            self.send_response(500)
-            self.send_header('Content-type', 'application/json')
+            self.wfile.write(json.dumps(result).encode())
+
+        except Exception as exc:
+            self._json_error(500, str(exc))
+
+    def _handle_image_upload(self):
+        try:
+            content_type = self.headers.get('Content-Type', '')
+            content_length = int(self.headers.get('Content-Length', 0))
+
+            # Use cgi.FieldStorage for robust multipart parsing
+            env = {
+                'REQUEST_METHOD': 'POST',
+                'CONTENT_TYPE': content_type,
+                'CONTENT_LENGTH': str(content_length),
+            }
+            form = cgi.FieldStorage(
+                fp=self.rfile,
+                headers=self.headers,
+                environ=env,
+            )
+
+            if 'file' not in form:
+                self._json_error(400, "No file field in request. Use field name 'file'.")
+                return
+
+            file_item = form['file']
+            image_bytes = file_item.file.read()
+
+            if not image_bytes:
+                self._json_error(400, "Uploaded file is empty.")
+                return
+
+            # Process
+            masked_bytes, report = mask_pii_in_image(image_bytes)
+
+            self.send_response(200)
+            self.send_header('Content-Type', 'image/jpeg')
+            self.send_header('Content-Length', str(len(masked_bytes)))
+            self.send_header('X-PII-Report', json.dumps(report))
+            self.send_header('X-PII-Count', str(len(report)))
+            _cors_headers(self)
             self.end_headers()
-            
-            error_message = json.dumps({"detail": f"Error processing image: {str(e)}"})
-            self.wfile.write(error_message.encode())
+            self.wfile.write(masked_bytes)
+
+        except Exception as exc:
+            self._json_error(500, f"Processing error: {str(exc)}")
+
+    def _json_error(self, code: int, detail: str):
+        body = json.dumps({"error": detail}).encode()
+        self.send_response(code)
+        self.send_header('Content-Type', 'application/json')
+        self.send_header('Content-Length', str(len(body)))
+        _cors_headers(self)
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, fmt, *args):
+        pass  # Suppress default request logging

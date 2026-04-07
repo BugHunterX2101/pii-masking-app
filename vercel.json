@@ -4,35 +4,27 @@
     {
       "src": "frontend/package.json",
       "use": "@vercel/static-build",
-      "config": {
-        "distDir": "build"
-      }
+      "config": { "distDir": "build" }
     },
     {
       "src": "api/index.py",
       "use": "@vercel/python"
+    },
+    {
+      "src": "api/upload.py",
+      "use": "@vercel/python"
+    },
+    {
+      "src": "api/processed/[filename].py",
+      "use": "@vercel/python"
     }
   ],
   "routes": [
-    {
-      "src": "/api/(.*)",
-      "dest": "api/index.py"
-    },
-    {
-      "src": "/static/(.*)",
-      "dest": "/frontend/build/static/$1"
-    },
-    {
-      "src": "/favicon.ico",
-      "dest": "/frontend/build/favicon.ico"
-    },
-    {
-      "src": "/manifest.json",
-      "dest": "/frontend/build/manifest.json"
-    },
-    {
-      "src": "/(.*)",
-      "dest": "/frontend/build/index.html"
-    }
+    { "src": "/api/upload",       "dest": "api/upload.py"  },
+    { "src": "/api/upload/",      "dest": "api/upload.py"  },
+    { "src": "/api/mask-text",    "dest": "api/upload.py"  },
+    { "src": "/api/processed/(.*)", "dest": "api/processed/[filename].py" },
+    { "src": "/api/(.*)",         "dest": "api/index.py"   },
+    { "src": "/(.*)",             "dest": "/frontend/build/index.html" }
   ]
 }
