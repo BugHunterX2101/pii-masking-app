@@ -1,6 +1,4 @@
-fastapi==0.116.1
-python-multipart==0.0.20
-pillow==10.2.0
+# Vercel serverless function dependencies
 easyocr==1.7.2
-opencv-python-headless==4.7.0.72
-numpy==1.23.5
+opencv-python-headless==4.8.1.78
+numpy>=1.24.0,<2.0.0

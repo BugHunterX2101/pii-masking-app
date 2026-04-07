@@ -4,11 +4,7 @@
     {
       "src": "frontend/package.json",
       "use": "@vercel/static-build",
-      "config": { "distDir": "build" }
-    },
-    {
-      "src": "api/index.py",
-      "use": "@vercel/python"
+      "config": { "distDir": "frontend/build" }
     },
     {
       "src": "api/upload.py",
@@ -17,14 +13,17 @@
     {
       "src": "api/processed/[filename].py",
       "use": "@vercel/python"
+    },
+    {
+      "src": "api/index.py",
+      "use": "@vercel/python"
     }
   ],
   "routes": [
-    { "src": "/api/upload",       "dest": "api/upload.py"  },
-    { "src": "/api/upload/",      "dest": "api/upload.py"  },
-    { "src": "/api/mask-text",    "dest": "api/upload.py"  },
-    { "src": "/api/processed/(.*)", "dest": "api/processed/[filename].py" },
-    { "src": "/api/(.*)",         "dest": "api/index.py"   },
-    { "src": "/(.*)",             "dest": "/frontend/build/index.html" }
+    { "src": "/api/upload/?",        "dest": "api/upload.py"                   },
+    { "src": "/api/mask-text/?",     "dest": "api/upload.py"                   },
+    { "src": "/api/processed/(.*)",  "dest": "api/processed/[filename].py"     },
+    { "src": "/api(.*)",             "dest": "api/index.py"                    },
+    { "src": "/(.*)",                "dest": "frontend/build/index.html"       }
   ]
 }
