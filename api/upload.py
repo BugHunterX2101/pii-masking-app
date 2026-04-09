@@ -106,7 +106,7 @@ def mask_pii_in_image(image_bytes: bytes):
             # Black fill rectangle
             cv2.rectangle(masked, top_left, bottom_right, (0, 0, 0), -1)
             report.append({
-                "original_text": text,
+                "text": text,
                 "pii_types": detection["types"],
                 "confidence": round(float(confidence), 3),
                 "bbox": [list(map(int, p)) for p in bbox],
@@ -139,6 +139,8 @@ def _cors_headers(handler_instance):
     handler_instance.send_header('Access-Control-Allow-Origin', '*')
     handler_instance.send_header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
     handler_instance.send_header('Access-Control-Allow-Headers', 'Content-Type, X-Requested-With')
+    # Expose custom headers so browser JS can read them via res.headers.get()
+    handler_instance.send_header('Access-Control-Expose-Headers', 'X-PII-Report, X-PII-Count')
 
 
 class handler(BaseHTTPRequestHandler):

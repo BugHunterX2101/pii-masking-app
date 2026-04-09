@@ -1,15 +1,11 @@
-from fastapi import FastAPI, UploadFile, File, HTTPException, Request
-from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from fastapi import FastAPI, UploadFile, File, HTTPException
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 import shutil
 import os
 import uuid
 import re
-import io
-import json
-from PIL import Image
 import cv2
-import numpy as np
 from typing import Optional
 from pydantic import BaseModel
 
