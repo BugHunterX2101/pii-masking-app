@@ -1,15 +1,26 @@
-from fastapi import FastAPI, UploadFile, File, HTTPException
-from fastapi.responses import FileResponse, JSONResponse
+"""
+PII Masking API — FastAPI backend
+Enterprise Phase 2: Auth0 SSO, AWS S3, Google Cloud Vision OCR
+"""
+from fastapi import FastAPI, UploadFile, File, HTTPException, Depends, status, Request
+from fastapi.responses import Response, JSONResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
-import shutil
+from fastapi.security import OAuth2PasswordBearer
+from sqlalchemy.orm import Session
 import os
+import json
+import io
 import uuid
-import re
-import cv2
-from typing import Optional
 from pydantic import BaseModel
+import boto3
+from botocore.exceptions import NoCredentialsError
 
-app = FastAPI(title="PII Masking API", version="2.0.0")
+from app import models, database, auth, pii_engine, file_handlers
+from app.database import engine, get_db
+
+models.Base.metadata.create_all(bind=engine)
+
+app = FastAPI(title="Enterprise Privacy Suite", version="4.0.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -17,108 +28,292 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["X-PII-Report", "X-PII-Count"],
 )
 
-UPLOAD_DIR = "uploads"
-PROCESSED_DIR = "processed"
-os.makedirs(UPLOAD_DIR, exist_ok=True)
-os.makedirs(PROCESSED_DIR, exist_ok=True)
-
 # -------------------------------------------------------------------
-# PII patterns — fixed false positives, added new document types
+# Environment & Cloud Config
 # -------------------------------------------------------------------
-PII_PATTERNS = {
-    "aadhaar":       re.compile(r'\b\d{4}\s\d{4}\s\d{4}\b'),
-    "pan_card":      re.compile(r'\b[A-Z]{5}[0-9]{4}[A-Z]\b'),
-    "passport":      re.compile(r'\b[A-Z][0-9]{7}\b'),
-    "phone":         re.compile(r'(?<!\d)(\+?91[\s\-]?)?[6-9]\d{9}(?!\d)'),
-    "email":         re.compile(r'\b[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}\b'),
-    "date_of_birth": re.compile(r'\b\d{2}[/\-\.]\d{2}[/\-\.]\d{4}\b'),
-    "credit_card":   re.compile(r'\b(?:\d[ \-]?){13,16}\b'),
-    "pincode":       re.compile(r'\b[1-9]\d{5}\b'),
-    "vehicle_reg":   re.compile(r'\b[A-Z]{2}\s?\d{2}\s?[A-Z]{1,2}\s?\d{4}\b'),
-}
+AWS_REGION = os.getenv("AWS_REGION", "us-east-2")
+S3_BUCKET = os.getenv("S3_BUCKET_NAME", "pii-mask-ocr-files")
 
-KEYWORD_GROUPS = {
-    "name_field":    re.compile(r'\b(name|naam|full name)\b', re.I),
-    "address_field": re.compile(r'\b(address|addr|residence|pata|locality)\b', re.I),
-    "dob_field":     re.compile(r'\b(date of birth|dob|born|janm|d\.o\.b)\b', re.I),
-    "gender_field":  re.compile(r'\b(male|female|gender|sex)\b', re.I),
-}
+s3_client = boto3.client('s3', region_name=AWS_REGION)
 
-# Lazy OCR reader — loaded on first image request, not at import time
-_ocr_reader = None
-
-def get_reader():
-    global _ocr_reader
-    if _ocr_reader is None:
-        import easyocr
-        _ocr_reader = easyocr.Reader(['en'], gpu=False, verbose=False)
-    return _ocr_reader
-
-
-def detect_pii(text: str) -> dict:
-    found_types = []
-    redacted = text
-    for name, pattern in PII_PATTERNS.items():
-        if pattern.search(text):
-            found_types.append(name)
-            redacted = pattern.sub(f"[{name.upper()}_MASKED]", redacted)
-    for name, pattern in KEYWORD_GROUPS.items():
-        if pattern.search(text) and name not in found_types:
-            found_types.append(name)
-    return {"found": bool(found_types), "types": found_types, "redacted": redacted}
+# Point GCP SDK to our JSON file credentials
+gcp_creds = os.getenv("GCP_CREDENTIALS_JSON")
+if gcp_creds:
+    with open("/tmp/gcp.json", "w") as f:
+        f.write(gcp_creds)
+    os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = "/tmp/gcp.json"
+else:
+    # Local fallback
+    os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = os.path.join(os.path.dirname(__file__), "..", "..", "pii-mask-499914-9ed290e326eb.json")
 
 
 # -------------------------------------------------------------------
-# Routes
+# Auth0 Integration
 # -------------------------------------------------------------------
+# We still use OAuth2PasswordBearer to extract the token from the header
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="none")
 
-@app.get("/")
-def read_root():
-    return {
-        "message": "PII Masking API v2.0 is running",
-        "endpoints": {
-            "POST /upload/": "Upload image for PII masking",
-            "POST /mask-text/": "Mask PII in plain text",
-            "GET /processed/{filename}": "Download processed image",
-        }
-    }
+def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)):
+    payload = auth.verify_auth0_token(token)
+    sub = payload.get("sub")
+    if not sub:
+        raise HTTPException(status_code=401, detail="Invalid token: missing sub claim")
+        
+    user = db.query(models.User).filter(models.User.username == sub).first()
+    if user is None:
+        raise HTTPException(status_code=401, detail="User not synced. Please call /api/auth/sync first.")
+    return user
 
+def require_admin(current_user: models.User = Depends(get_current_user)):
+    if current_user.role != "admin":
+        raise HTTPException(status_code=403, detail="Admin privileges required")
+    return current_user
 
-@app.post("/upload/")
-async def upload_image(file: UploadFile = File(...)):
-    if not file.content_type or not file.content_type.startswith('image/'):
-        raise HTTPException(status_code=400, detail="File must be an image (JPEG, PNG, etc.)")
+# -------------------------------------------------------------------
+# Helper: Get active policies & Logging
+# -------------------------------------------------------------------
+def get_active_entities(db: Session):
+    policies = db.query(models.DLPPolicy).filter(models.DLPPolicy.is_active == True).all()
+    if not policies:
+        default = ["PERSON", "EMAIL_ADDRESS", "PHONE_NUMBER", "CREDIT_CARD", "AADHAAR", "PAN_CARD"]
+        for p in default:
+            db.add(models.DLPPolicy(pii_type=p, is_active=True))
+        db.commit()
+        return default
+    return [p.pii_type for p in policies]
 
-    ext = os.path.splitext(file.filename or "upload.jpg")[1] or ".jpg"
-    unique_name = f"{uuid.uuid4()}{ext}"
-    file_path = os.path.join(UPLOAD_DIR, unique_name)
+def log_audit(db: Session, user_id: int, action: str, ip: str, details: dict):
+    log = models.AuditLog(
+        user_id=user_id,
+        action=action,
+        ip_address=ip,
+        details=details
+    )
+    db.add(log)
+    db.commit()
 
-    with open(file_path, "wb") as buf:
-        shutil.copyfileobj(file.file, buf)
+# -------------------------------------------------------------------
+# Google Cloud Vision Image OCR
+# -------------------------------------------------------------------
+def mask_pii_in_image_gcp(image_bytes: bytes, active_entities: list[str]):
+    import cv2
+    import numpy as np
+    from google.cloud import vision
+    
+    # 1. OCR with Google Cloud Vision
+    client = vision.ImageAnnotatorClient()
+    image = vision.Image(content=image_bytes)
+    response = client.text_detection(image=image)
+    texts = response.text_annotations
+    
+    if response.error.message:
+        raise Exception(f"GCP Vision API Error: {response.error.message}")
+        
+    if not texts:
+        # No text found
+        return image_bytes, []
 
+    # Decode image using OpenCV for drawing
+    nparr = np.frombuffer(image_bytes, np.uint8)
+    img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+    masked = img.copy()
+    report = []
+    
+    # texts[0] is the entire text. texts[1:] are individual words/boxes
+    # We will run Presidio on the full text, but tracking individual word boxes is hard.
+    # Instead, we run Presidio on each block or paragraph if available, or just use the individual word annotations.
+    # For simplicity, we'll check each word/phrase returned by Vision.
+    for text_annotation in texts[1:]:
+        word = text_annotation.description
+        detection = pii_engine.detect_and_mask_text(word, active_entities)
+        
+        if detection["found"]:
+            # Draw bounding box
+            vertices = text_annotation.bounding_poly.vertices
+            top_left = (vertices[0].x, vertices[0].y)
+            bottom_right = (vertices[2].x, vertices[2].y)
+            
+            cv2.rectangle(masked, top_left, bottom_right, (0, 0, 0), -1)
+            report.append({
+                "text": word,
+                "pii_types": detection["types"]
+            })
+            
+    success, buffer = cv2.imencode('.jpg', masked, [cv2.IMWRITE_JPEG_QUALITY, 95])
+    return buffer.tobytes(), report
+
+# -------------------------------------------------------------------
+# S3 Upload Helper
+# -------------------------------------------------------------------
+def upload_raw_to_s3(file_bytes: bytes, filename: str, content_type: str) -> str:
+    s3_key = f"raw_{uuid.uuid4().hex}_{filename}"
+    s3_client.put_object(
+        Bucket=S3_BUCKET,
+        Key=s3_key,
+        Body=file_bytes,
+        ContentType=content_type
+    )
+    return s3_key
+
+def upload_to_s3_and_get_url(file_bytes: bytes, filename: str, content_type: str) -> str:
     try:
-        masked_path, report = mask_pii(file_path)
-        return JSONResponse({
-            "filename": os.path.basename(masked_path),
-            "pii_detected": len(report),
-            "report": report,
+        s3_key = f"masked_{uuid.uuid4().hex}_{filename}"
+        s3_client.put_object(
+            Bucket=S3_BUCKET,
+            Key=s3_key,
+            Body=file_bytes,
+            ContentType=content_type,
+            # We don't set ACL='public-read' to keep it secure
+        )
+        # Generate presigned URL
+        url = s3_client.generate_presigned_url(
+            'get_object',
+            Params={'Bucket': S3_BUCKET, 'Key': s3_key},
+            ExpiresIn=3600 # 1 hour
+        )
+        return url
+    except Exception as e:
+        print("S3 Upload Error:", e)
+        # Fallback to base64 data URI if S3 fails (for robust local dev without keys)
+        import base64
+        b64 = base64.b64encode(file_bytes).decode('utf-8')
+        return f"data:{content_type};base64,{b64}"
+
+# -------------------------------------------------------------------
+# Auth0 Sync Route
+# -------------------------------------------------------------------
+@app.post("/api/auth/sync")
+def sync_user(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db), request: Request = None):
+    """Called by frontend right after Auth0 login to sync the user to our Postgres DB."""
+    payload = auth.verify_auth0_token(token)
+    sub = payload.get("sub")
+    
+    user = db.query(models.User).filter(models.User.username == sub).first()
+    if not user:
+        is_first = db.query(models.User).count() == 0
+        role = "admin" if is_first else "user"
+        # We store Auth0 'sub' in username field. Hashed password is N/A for SSO.
+        user = models.User(username=sub, hashed_password="SSO", role=role)
+        db.add(user)
+        db.commit()
+        db.refresh(user)
+        
+    ip = request.client.host if request and request.client else "N/A"
+    log_audit(db, user.id, "LOGIN", ip, {"provider": "Auth0"})
+    
+    return {"status": "synced", "role": user.role, "user_id": user.id}
+
+# -------------------------------------------------------------------
+# Admin Endpoints
+# -------------------------------------------------------------------
+@app.get("/api/admin/logs")
+def get_audit_logs(db: Session = Depends(get_db), current_user: models.User = Depends(require_admin)):
+    logs = db.query(models.AuditLog).order_by(models.AuditLog.timestamp.desc()).limit(100).all()
+    return [{
+        "id": l.id,
+        "user_id": l.user.username if l.user else l.user_id, # return auth0 sub
+        "action": l.action,
+        "timestamp": l.timestamp,
+        "ip_address": l.ip_address,
+        "details": l.details
+    } for l in logs]
+
+@app.get("/api/admin/policies")
+def get_policies(db: Session = Depends(get_db), current_user: models.User = Depends(require_admin)):
+    return db.query(models.DLPPolicy).all()
+
+class PolicyUpdate(BaseModel):
+    pii_type: str
+    is_active: bool
+
+@app.post("/api/admin/policies")
+def update_policy(update: PolicyUpdate, db: Session = Depends(get_db), current_user: models.User = Depends(require_admin)):
+    policy = db.query(models.DLPPolicy).filter(models.DLPPolicy.pii_type == update.pii_type).first()
+    if policy:
+        policy.is_active = update.is_active
+    else:
+        db.add(models.DLPPolicy(pii_type=update.pii_type, is_active=update.is_active))
+    db.commit()
+    return {"msg": "Policy updated"}
+
+# -------------------------------------------------------------------
+# App API Routes (Protected)
+# -------------------------------------------------------------------
+@app.post("/api/upload")
+async def upload_file(request: Request, file: UploadFile = File(...), current_user: models.User = Depends(get_current_user), db: Session = Depends(get_db)):
+    active_entities = get_active_entities(db)
+    file_bytes = await file.read()
+    
+    ext = file.filename.lower().split('.')[-1] if '.' in file.filename else ''
+    
+    try:
+        # Determine media type based on extension
+        if ext in ['pdf']:
+            media_type = "application/pdf"
+        elif ext in ['docx']:
+            media_type = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        elif ext in ['jpg', 'jpeg', 'png', 'webp']:
+            media_type = "image/jpeg"
+        else:
+            raise HTTPException(status_code=400, detail="Unsupported file format.")
+
+        # Upload raw file to S3 first
+        s3_key = upload_raw_to_s3(file_bytes, file.filename, media_type)
+
+        # Dispatch Celery task
+        from app.worker import process_document_task
+        task = process_document_task.delay(s3_key, file.filename, media_type, active_entities)
+
+        # Log audit for task initiation
+        log_audit(db, current_user.id, "FILE_MASK_TASK_STARTED", request.client.host if request.client else "N/A", {
+            "filename": file.filename,
+            "task_id": task.id
+        })
+
+        return JSONResponse(status_code=202, content={
+            "status": "accepted",
+            "task_id": task.id,
+            "message": "Document is being processed asynchronously."
         })
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"Processing error: {str(exc)}")
+        raise HTTPException(status_code=500, detail=str(exc))
 
+@app.get("/api/tasks/{task_id}")
+async def get_task_status(task_id: str, current_user: models.User = Depends(get_current_user)):
+    from app.worker import celery_app
+    task_result = celery_app.AsyncResult(task_id)
+    
+    response = {
+        "task_id": task_id,
+        "status": task_result.status,
+    }
+    
+    if task_result.status == 'SUCCESS':
+        response["result"] = task_result.result
+    elif task_result.status == 'FAILURE':
+        response["error"] = str(task_result.info)
+    elif task_result.status == 'PROCESSING':
+        # Custom state updated via update_state
+        response["message"] = task_result.info.get('status', 'Processing...') if isinstance(task_result.info, dict) else 'Processing...'
+
+    return response
 
 class TextMaskRequest(BaseModel):
     text: str
-    highlight: Optional[bool] = False
 
-
-@app.post("/mask-text/")
-async def mask_text(req: TextMaskRequest):
-    if not req.text.strip():
-        raise HTTPException(status_code=400, detail="'text' field is required.")
-    result = detect_pii(req.text)
+@app.post("/api/mask-text")
+async def mask_text(request: Request, req: TextMaskRequest, current_user: models.User = Depends(get_current_user), db: Session = Depends(get_db)):
+    active_entities = get_active_entities(db)
+    result = pii_engine.detect_and_mask_text(req.text, active_entities)
+    
+    if result["found"]:
+        log_audit(db, current_user.id, "TEXT_MASK", request.client.host if request.client else "N/A", {
+            "detected": result["types"]
+        })
+        
     return {
         "original": req.text,
         "masked": result["redacted"],
@@ -127,48 +322,22 @@ async def mask_text(req: TextMaskRequest):
         "count": len(result["types"]),
     }
 
+# -------------------------------------------------------------------
+# Serve React static build
+# -------------------------------------------------------------------
+_THIS_DIR = os.path.dirname(os.path.abspath(__file__))
+STATIC_DIR = os.path.normpath(os.path.join(_THIS_DIR, "..", "..", "frontend", "build"))
 
-@app.get("/processed/{filename}")
-async def get_processed_image(filename: str):
-    # Security: prevent path traversal
-    safe_name = os.path.basename(filename)
-    file_path = os.path.join(PROCESSED_DIR, safe_name)
-    if not os.path.exists(file_path):
-        raise HTTPException(status_code=404, detail="Processed image not found")
-    return FileResponse(file_path, media_type="image/jpeg",
-                        headers={"Content-Disposition": f'attachment; filename="{safe_name}"'})
-
-
-def mask_pii(image_path: str):
-    img = cv2.imread(image_path)
-    if img is None:
-        raise ValueError("Could not decode image")
-
-    rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-    reader = get_reader()
-    results = reader.readtext(rgb)
-
-    masked = img.copy()
-    report = []
-
-    for (bbox, text, conf) in results:
-        detection = detect_pii(text)
-        if detection["found"]:
-            tl = tuple(map(int, bbox[0]))
-            br = tuple(map(int, bbox[2]))
-            cv2.rectangle(masked, tl, br, (0, 0, 0), -1)
-            report.append({
-                "text": text,
-                "pii_types": detection["types"],
-                "confidence": round(float(conf), 3),
-            })
-
-    out_name = f"masked_{os.path.basename(image_path)}"
-    out_path = os.path.join(PROCESSED_DIR, out_name)
-    cv2.imwrite(out_path, masked)
-    return out_path, report
-
-
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
+@app.get("/{full_path:path}")
+async def serve_frontend(full_path: str):
+    if not os.path.isdir(STATIC_DIR):
+        return JSONResponse({"info": "Frontend not built."}, status_code=200)
+    if full_path:
+        file_path = os.path.join(STATIC_DIR, full_path)
+        real_path = os.path.realpath(file_path)
+        if real_path.startswith(os.path.realpath(STATIC_DIR)) and os.path.isfile(real_path):
+            return FileResponse(real_path)
+    index_path = os.path.join(STATIC_DIR, "index.html")
+    if os.path.isfile(index_path):
+        return FileResponse(index_path)
+    return JSONResponse({"error": "index.html not found"}, status_code=404)

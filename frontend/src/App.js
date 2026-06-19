@@ -1,20 +1,15 @@
-import React, { useState, useCallback, useRef } from 'react';
+import React, { useState, useCallback, useRef, useEffect } from 'react';
+import { useAuth0 } from '@auth0/auth0-react';
+import { 
+  Search, Image as ImageIcon, Type, CheckCircle, FileText, Lock, 
+  AlertTriangle, Download, RefreshCw, UploadCloud, ScanLine, 
+  ShieldCheck, LogOut, Settings, Activity, ToggleLeft, ToggleRight, User
+} from 'lucide-react';
 import './App.css';
 
-// ── PII tag colour helper ──────────────────────────────────
-const tagClass = (type) => {
-  const known = [
-    'aadhaar','phone','email','pan_card','passport','credit_card',
-    'date_of_birth','pincode','vehicle_reg','name_field','address_field',
-    'dob_field','gender_field'
-  ];
-  return known.includes(type) ? `report-tag tag-${type}` : 'report-tag tag-default';
-};
+const tagClass = (type) => `report-tag tag-default`;
+const formatType = (t) => t.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
 
-const formatType = (t) =>
-  t.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
-
-// ── Render masked text with highlighted tokens ─────────────
 function MaskedText({ text }) {
   const parts = text.split(/(\[[A-Z_]+_MASKED\])/g);
   return (
@@ -28,22 +23,17 @@ function MaskedText({ text }) {
   );
 }
 
-// ── Detection report component ─────────────────────────────
 function DetectionReport({ report }) {
   if (!report) return null;
   return (
     <div className="report-section">
       <div className="report-header">
-        <h3>
-          <span>🔍</span> Detection Report
-        </h3>
-        <span className="report-count">
-          {report.length} item{report.length !== 1 ? 's' : ''} found
-        </span>
+        <h3><Search size={18} /> Detection Report</h3>
+        <span className="report-count">{report.length} item{report.length !== 1 ? 's' : ''} found</span>
       </div>
       <div className="report-body">
         {report.length === 0 ? (
-          <p className="report-empty">✓ No PII detected in this image.</p>
+          <p className="report-empty">✓ No PII detected.</p>
         ) : (
           report.map((item, i) => (
             <div className="report-item" key={i}>
@@ -55,9 +45,6 @@ function DetectionReport({ report }) {
                     <span key={t} className={tagClass(t)}>{formatType(t)}</span>
                   ))}
                 </div>
-                {item.confidence !== undefined && (
-                  <p className="report-conf">OCR confidence: {(item.confidence * 100).toFixed(1)}%</p>
-                )}
               </div>
             </div>
           ))
@@ -67,408 +54,345 @@ function DetectionReport({ report }) {
   );
 }
 
-// ── Main App ───────────────────────────────────────────────
 export default function App() {
-  const [tab, setTab] = useState('image'); // 'image' | 'text'
+  const { isAuthenticated, isLoading: authLoading, loginWithRedirect, logout, getIdTokenClaims, user } = useAuth0();
+  
+  const [role, setRole] = useState('user');
+  const [token, setToken] = useState(null);
 
-  // Image tab state
+  const [tab, setTab] = useState('file');
+
   const [file, setFile] = useState(null);
-  const [originalImage, setOriginalImage] = useState(null);
-  const [processedImage, setProcessedImage] = useState(null);
+  const [processedUrl, setProcessedUrl] = useState(null);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState('');
   const [report, setReport] = useState(null);
   const [dragOver, setDragOver] = useState(false);
 
-  // Text tab state
   const [inputText, setInputText] = useState('');
   const [textResult, setTextResult] = useState(null);
   const [textLoading, setTextLoading] = useState(false);
   const [textError, setTextError] = useState('');
 
-  const fileInputRef = useRef(null);
+  const [logs, setLogs] = useState([]);
+  const [policies, setPolicies] = useState([]);
 
-  // ── Image Handling ─────────────────────────────────────
+  const fileInputRef = useRef(null);
+  const apiUrl = process.env.REACT_APP_API_URL || '';
+
+  // Sync Auth0 user with backend and retrieve role
+  useEffect(() => {
+    const syncUser = async () => {
+      if (isAuthenticated) {
+        try {
+          const claims = await getIdTokenClaims();
+          const jwtToken = claims.__raw;
+          setToken(jwtToken);
+
+          // Call backend to sync user & fetch role
+          const res = await fetch(`${apiUrl}/api/auth/sync`, {
+            method: 'POST',
+            headers: { 'Authorization': `Bearer ${jwtToken}` }
+          });
+          if (res.ok) {
+            const data = await res.json();
+            setRole(data.role);
+          }
+        } catch (e) {
+          console.error("Failed to sync user:", e);
+        }
+      }
+    };
+    syncUser();
+  }, [isAuthenticated, getIdTokenClaims, apiUrl]);
+
+  const loadAdminData = useCallback(async () => {
+    if (!token || role !== 'admin') return;
+    try {
+      const pRes = await fetch(`${apiUrl}/api/admin/policies`, { headers: { 'Authorization': `Bearer ${token}` }});
+      if(pRes.ok) setPolicies(await pRes.json());
+      
+      const lRes = await fetch(`${apiUrl}/api/admin/logs`, { headers: { 'Authorization': `Bearer ${token}` }});
+      if(lRes.ok) setLogs(await lRes.json());
+    } catch(err) {}
+  }, [apiUrl, token, role]);
+
+  useEffect(() => {
+    if (tab === 'admin') loadAdminData();
+  }, [tab, loadAdminData]);
+
+  const handleApiError = (res) => {
+    if (res.status === 401) {
+      logout({ logoutParams: { returnTo: window.location.origin } });
+      throw new Error('Session expired. Please log in again.');
+    }
+  };
+
   const handleFileSelect = useCallback((selectedFile) => {
     if (!selectedFile) return;
-    if (!selectedFile.type.startsWith('image/')) {
-      setError('Please select a valid image file (JPEG, PNG, WebP, etc.)');
-      return;
-    }
-    if (selectedFile.size > 10 * 1024 * 1024) {
-      setError('File is too large. Maximum size is 10 MB.');
-      return;
-    }
     setFile(selectedFile);
-    setOriginalImage(URL.createObjectURL(selectedFile));
-    setProcessedImage(null);
+    setProcessedUrl(null);
     setReport(null);
     setError('');
   }, []);
 
-  const handleDrop = useCallback((e) => {
-    e.preventDefault();
-    setDragOver(false);
-    const dropped = e.dataTransfer.files[0];
-    handleFileSelect(dropped);
-  }, [handleFileSelect]);
-
-  const handleDragOver = (e) => { e.preventDefault(); setDragOver(true); };
-  const handleDragLeave = () => setDragOver(false);
-
   const handleProcess = async () => {
-    if (!file) { setError('Please select an image first.'); return; }
+    if (!file) { setError('Please select a file first.'); return; }
     setIsLoading(true);
     setError('');
-    setProcessedImage(null);
+    setProcessedUrl(null);
     setReport(null);
 
     const formData = new FormData();
     formData.append('file', file);
 
     try {
-      const apiUrl = process.env.REACT_APP_API_URL || '';
       const res = await fetch(`${apiUrl}/api/upload`, {
         method: 'POST',
+        headers: { 'Authorization': `Bearer ${token}` },
         body: formData,
       });
-
+      handleApiError(res);
       if (!res.ok) {
-        const errBody = await res.json().catch(() => ({ error: res.statusText }));
-        throw new Error(errBody.error || 'Processing failed.');
+        const errBody = await res.json().catch(() => ({ detail: res.statusText }));
+        throw new Error(errBody.detail || 'Processing failed.');
       }
 
-      // The server now returns the image binary directly
-      const blob = await res.blob();
-      setProcessedImage(URL.createObjectURL(blob));
+      const data = await res.json();
+      
+      if (res.status === 202 && data.task_id) {
+        pollTaskStatus(data.task_id);
+      } else {
+        // Fallback if backend responds synchronously
+        setProcessedUrl(data.download_url);
+        setReport(data.report);
+        setIsLoading(false);
+      }
 
-      // PII report comes in response header
-      const reportHeader = res.headers.get('X-PII-Report');
-      if (reportHeader) {
-        try { setReport(JSON.parse(reportHeader)); } catch (_) {}
+    } catch (err) {
+      setError(err.message || 'Processing failed.');
+      setIsLoading(false);
+    }
+  };
+
+  const pollTaskStatus = async (taskId) => {
+    try {
+      const res = await fetch(`${apiUrl}/api/tasks/${taskId}`, {
+        headers: { 'Authorization': `Bearer ${token}` }
+      });
+      handleApiError(res);
+      const data = await res.json();
+
+      if (data.status === 'SUCCESS') {
+        setProcessedUrl(data.result.download_url);
+        setReport(data.result.report);
+        setIsLoading(false);
+      } else if (data.status === 'FAILURE') {
+        setError(data.error || 'Task failed during processing.');
+        setIsLoading(false);
+      } else {
+        // Still processing, poll again in 2 seconds
+        setTimeout(() => pollTaskStatus(taskId), 2000);
       }
     } catch (err) {
-      console.error('Upload error:', err);
-      setError(err.message || 'Processing failed. Make sure the backend server is running.');
-    } finally {
+      setError('Error checking task status.');
       setIsLoading(false);
     }
   };
 
   const handleReset = () => {
     setFile(null);
-    setOriginalImage(null);
-    setProcessedImage(null);
+    setProcessedUrl(null);
     setReport(null);
     setError('');
     if (fileInputRef.current) fileInputRef.current.value = '';
   };
 
-  // ── Text Handling ──────────────────────────────────────
   const handleMaskText = async () => {
-    if (!inputText.trim()) { setTextError('Please enter some text to analyse.'); return; }
+    if (!inputText.trim()) { setTextError('Please enter some text.'); return; }
     setTextLoading(true);
     setTextError('');
     setTextResult(null);
 
     try {
-      const apiUrl = process.env.REACT_APP_API_URL || '';
       const res = await fetch(`${apiUrl}/api/mask-text`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}`
+        },
         body: JSON.stringify({ text: inputText }),
       });
-
-      if (!res.ok) {
-        const errBody = await res.json().catch(() => ({ error: res.statusText }));
-        throw new Error(errBody.error || 'Text analysis failed.');
-      }
-
+      handleApiError(res);
+      if (!res.ok) throw new Error('Text analysis failed.');
       setTextResult(await res.json());
     } catch (err) {
-      console.error('Text mask error:', err);
       setTextError(err.message || 'Text analysis failed.');
     } finally {
       setTextLoading(false);
     }
   };
 
-  // ── Render ─────────────────────────────────────────────
+  const togglePolicy = async (piiType, currentStatus) => {
+    try {
+      await fetch(`${apiUrl}/api/admin/policies`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+        body: JSON.stringify({ pii_type: piiType, is_active: !currentStatus })
+      });
+      loadAdminData();
+    } catch(e) {}
+  };
+
+  if (authLoading) {
+    return <div className="App auth-bg"><div className="loader-ring"></div></div>;
+  }
+
+  if (!isAuthenticated) {
+    return (
+      <div className="App auth-bg">
+        <div className="bg-pattern" />
+        <div className="auth-container">
+          <div className="auth-card" style={{ textAlign: 'center' }}>
+            <div className="auth-header">
+              <ShieldCheck size={48} className="auth-icon" style={{ margin: '0 auto 16px' }} />
+              <h2>Enterprise Privacy Suite</h2>
+              <p>Corporate Single Sign-On</p>
+            </div>
+            <button className="btn-primary" style={{ width: '100%', justifyContent: 'center' }} onClick={() => loginWithRedirect()}>
+              Log In with Auth0
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="App">
       <div className="bg-pattern" />
-
-      {/* Header */}
       <header className="App-header">
+        <div className="header-top-right" style={{ display: 'flex', alignItems: 'center', gap: '16px' }}>
+          <span style={{ color: 'var(--text-muted)', display: 'flex', alignItems: 'center', gap: '6px' }}>
+            <img src={user?.picture} alt="Avatar" style={{ width: 24, height: 24, borderRadius: '50%' }} />
+            {user?.name}
+          </span>
+          <span style={{ color: 'var(--text-muted)' }}>Role: <b>{role}</b></span>
+          <button className="btn-logout" onClick={() => logout({ logoutParams: { returnTo: window.location.origin } })}>
+            <LogOut size={16} /> Sign out
+          </button>
+        </div>
         <div className="header-inner">
-          <div className="header-badge">
-            <span className="header-badge-dot" />
-            Privacy Protection Tool
-          </div>
+          <div className="header-badge"><span className="header-badge-dot" /> Enterprise Edition</div>
           <h1>Mask <em>Sensitive</em> Information</h1>
-          <p>
-            Automatically detect and redact personally identifiable information
-            from documents, images, and text using OCR and pattern recognition.
-          </p>
-          <div className="header-ornament">
-            <span /><i>✦</i><span />
-          </div>
         </div>
       </header>
 
-      {/* Main */}
       <main className="App-main">
-
-        {/* Tab nav */}
         <div className="tab-nav">
-          <button
-            className={`tab-btn${tab === 'image' ? ' active' : ''}`}
-            onClick={() => setTab('image')}
-          >
-            <span className="tab-icon">🖼️</span> Image
-          </button>
-          <button
-            className={`tab-btn${tab === 'text' ? ' active' : ''}`}
-            onClick={() => setTab('text')}
-          >
-            <span className="tab-icon">✍️</span> Text
-          </button>
+          <button className={`tab-btn${tab === 'file' ? ' active' : ''}`} onClick={() => setTab('file')}><FileText size={18} /> Document (Cloud OCR)</button>
+          <button className={`tab-btn${tab === 'text' ? ' active' : ''}`} onClick={() => setTab('text')}><Type size={18} /> Text</button>
+          {role === 'admin' && (
+            <button className={`tab-btn${tab === 'admin' ? ' active' : ''}`} onClick={() => setTab('admin')}><Settings size={18} /> Admin</button>
+          )}
         </div>
 
-        {/* ── IMAGE TAB ── */}
-        {tab === 'image' && (
+        {tab === 'file' && (
           <div className="upload-section">
-            <div
-              className={`drop-zone${dragOver ? ' drag-over' : ''}${file ? ' has-file' : ''}`}
-              onDrop={handleDrop}
-              onDragOver={handleDragOver}
-              onDragLeave={handleDragLeave}
-            >
-              <input
-                ref={fileInputRef}
-                type="file"
-                accept="image/*"
-                onChange={(e) => handleFileSelect(e.target.files[0])}
-                className="file-input-hidden"
-              />
+            <div className={`drop-zone${dragOver ? ' drag-over' : ''}${file ? ' has-file' : ''}`}
+                 onDrop={handleDrop} onDragOver={e => {e.preventDefault(); setDragOver(true);}} onDragLeave={() => setDragOver(false)}>
+              <input ref={fileInputRef} type="file" onChange={(e) => handleFileSelect(e.target.files[0])} className="file-input-hidden" />
               {file ? (
                 <>
-                  <span className="drop-icon">✅</span>
-                  <p className="drop-title">Image ready</p>
-                  <p className="drop-sub">Click to change file</p>
-                  <span className="file-info">
-                    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
-                    {file.name} · {(file.size / 1024).toFixed(0)} KB
-                  </span>
+                  <CheckCircle size={48} className="drop-icon" style={{color: 'var(--success)'}} />
+                  <p className="drop-title">File ready</p>
+                  <span className="file-info">{file.name} · {(file.size / 1024).toFixed(0)} KB</span>
                 </>
               ) : (
                 <>
-                  <span className="drop-icon">📄</span>
-                  <p className="drop-title">Drop your image here</p>
-                  <p className="drop-sub">Supports JPEG, PNG, WebP, BMP — up to 10 MB</p>
-                  <span className="drop-browse">or click to browse files</span>
+                  <UploadCloud size={56} className="drop-icon" />
+                  <p className="drop-title">Drop document or image</p>
+                  <p className="drop-sub">Processed securely via Google Cloud Vision & AWS S3</p>
                 </>
               )}
             </div>
 
-            {error && (
-              <div className="alert alert-error">
-                <span className="alert-icon">⚠</span> {error}
-              </div>
-            )}
+            {error && <div className="alert alert-error"><AlertTriangle size={18} /> {error}</div>}
 
             <div className="btn-row">
-              <button
-                className="btn-primary"
-                onClick={handleProcess}
-                disabled={!file || isLoading}
-              >
-                {isLoading
-                  ? <><div className="loader-ring" style={{ width: 18, height: 18, borderWidth: 2 }} /> Processing…</>
-                  : <><span>🔒</span> Mask PII</>
-                }
+              <button className="btn-primary" onClick={handleProcess} disabled={!file || isLoading}>
+                {isLoading ? 'Processing in Cloud…' : <><Lock size={18} /> Mask Document</>}
               </button>
-              {(file || processedImage) && (
-                <button className="btn-secondary" onClick={handleReset}>
-                  ↺ Reset
-                </button>
-              )}
-              {processedImage && (
-                <a href={processedImage} download="masked_image.jpg" className="btn-download">
-                  ⬇ Download
-                </a>
-              )}
+              {(file || processedUrl) && <button className="btn-secondary" onClick={handleReset}><RefreshCw size={16} /> Reset</button>}
+              {processedUrl && <a href={processedUrl} target="_blank" rel="noreferrer" className="btn-download"><Download size={16} /> Download from S3</a>}
             </div>
-
-            {/* Image comparison */}
-            {(originalImage || processedImage || isLoading) && (
-              <div className="image-grid">
-                <div className="image-card">
-                  <div className="image-card-header">
-                    <span className="image-card-title">
-                      <span className="image-card-title-dot dot-original" />
-                      Original
-                    </span>
-                    {file && <span style={{ fontSize: '11px', color: 'var(--charcoal-soft)' }}>{file.name}</span>}
-                  </div>
-                  <div className="image-card-body">
-                    {originalImage
-                      ? <img src={originalImage} alt="Original upload" />
-                      : <div className="image-placeholder"><span className="image-placeholder-icon">🖼️</span><p>No image selected</p></div>
-                    }
-                  </div>
-                </div>
-
-                <div className="image-card">
-                  <div className="image-card-header">
-                    <span className="image-card-title">
-                      <span className="image-card-title-dot dot-processed" />
-                      Masked
-                    </span>
-                    {processedImage && (
-                      <span style={{ fontSize: '11px', color: 'var(--sage)', fontWeight: 600 }}>PII redacted ✓</span>
-                    )}
-                  </div>
-                  <div className="image-card-body">
-                    {isLoading
-                      ? <div className="loading-state"><div className="loader-ring" /><p>Scanning with OCR…</p></div>
-                      : processedImage
-                        ? <img src={processedImage} alt="Processed with PII masked" />
-                        : <div className="image-placeholder"><span className="image-placeholder-icon">🔒</span><p>Masked result will appear here</p></div>
-                    }
-                  </div>
-                </div>
-              </div>
-            )}
-
-            {/* Detection report */}
             {report && !isLoading && <DetectionReport report={report} />}
           </div>
         )}
 
-        {/* ── TEXT TAB ── */}
+        {/* Text and Admin tabs remain same layout, just omitting implementation here for brevity to focus on changes */}
         {tab === 'text' && (
           <div className="text-section">
-            <label>Enter text to scan and mask</label>
             <div className="text-input-wrap">
-              <textarea
-                placeholder="Paste any text here — e.g. 'My name is John Doe, born on 12/03/1990. My Aadhaar is 1234 5678 9012 and email is john@example.com.'"
-                value={inputText}
-                onChange={e => { setInputText(e.target.value); setTextResult(null); setTextError(''); }}
-                rows={8}
-              />
+              <textarea placeholder="Paste text here..." value={inputText} onChange={e => setInputText(e.target.value)} rows={8} />
             </div>
-
-            {textError && (
-              <div className="alert alert-error">
-                <span className="alert-icon">⚠</span> {textError}
-              </div>
-            )}
-
+            {textError && <div className="alert alert-error">{textError}</div>}
             <div className="btn-row">
-              <button
-                className="btn-primary"
-                onClick={handleMaskText}
-                disabled={!inputText.trim() || textLoading}
-              >
-                {textLoading
-                  ? <><div className="loader-ring" style={{ width: 18, height: 18, borderWidth: 2 }} /> Scanning…</>
-                  : <><span>🔍</span> Detect &amp; Mask</>
-                }
+              <button className="btn-primary" onClick={handleMaskText} disabled={!inputText.trim() || textLoading}>
+                {textLoading ? 'Scanning…' : <><ScanLine size={18} /> Mask Text</>}
               </button>
-              {textResult && (
-                <button className="btn-secondary" onClick={() => { setInputText(''); setTextResult(null); }}>
-                  ↺ Clear
-                </button>
-              )}
+              {textResult && <button className="btn-secondary" onClick={() => { setInputText(''); setTextResult(null); }}>Clear</button>}
             </div>
-
             {textResult && (
-              <div className="text-result-card mt-md">
-                <div className="text-result-header">
-                  <span>Masked output</span>
-                  <div className="report-tags">
-                    {textResult.pii_types.map(t => (
-                      <span key={t} className={tagClass(t)}>{formatType(t)}</span>
-                    ))}
-                  </div>
-                </div>
+              <div className="text-result-card">
+                <div className="text-result-header">Masked output</div>
                 <div className="text-result-body">
-                  {textResult.pii_found
-                    ? <MaskedText text={textResult.masked} />
-                    : <span style={{ color: 'var(--charcoal-soft)', fontStyle: 'italic' }}>No PII detected in this text.</span>
-                  }
-                </div>
-                <div className="text-stats">
-                  <span className="text-stat">
-                    Detected: <strong>{textResult.count}</strong> type{textResult.count !== 1 ? 's' : ''}
-                  </span>
-                  {textResult.pii_found && (
-                    <span className="text-stat">
-                      Status: <strong style={{ color: 'var(--sage)' }}>Masked ✓</strong>
-                    </span>
-                  )}
+                  {textResult.pii_found ? <MaskedText text={textResult.masked} /> : <span style={{ color: 'var(--text-muted)' }}>No PII detected.</span>}
                 </div>
               </div>
-            )}
-
-            {!textResult && !textLoading && (
-              <div className="divider mt-lg" />
             )}
           </div>
         )}
 
-        {/* How it works */}
-        <div className="how-section">
-          <h2 className="how-title">How it works</h2>
-          <p className="how-sub">Three steps to protect sensitive information</p>
-          <div className="how-grid">
-            {[
-              { icon: '📤', step: 1, title: 'Upload or paste', desc: 'Provide an image of a document or paste text containing sensitive data.' },
-              { icon: '🔍', step: 2, title: 'OCR & detection', desc: 'EasyOCR reads text from images. Regex patterns and keywords identify PII types.' },
-              { icon: '🔒', step: 3, title: 'Mask & download', desc: 'Detected areas are blacked out in images or replaced with tokens in text.' },
-            ].map(card => (
-              <div className="how-card" key={card.step}>
-                <span className="how-step-num">{card.step}</span>
-                <span className="how-card-icon">{card.icon}</span>
-                <h4>{card.title}</h4>
-                <p>{card.desc}</p>
+        {tab === 'admin' && role === 'admin' && (
+          <div className="admin-section">
+            <div className="admin-grid">
+              <div className="admin-card">
+                <h3><ShieldCheck size={20}/> DLP Policies</h3>
+                <div className="policy-list">
+                  {policies.map(p => (
+                    <div className="policy-item" key={p.pii_type}>
+                      <span>{p.pii_type}</span>
+                      <button className="toggle-btn" onClick={() => togglePolicy(p.pii_type, p.is_active)} style={{color: p.is_active ? 'var(--accent-cyan)' : 'var(--text-muted)'}}>
+                        {p.is_active ? <ToggleRight size={28}/> : <ToggleLeft size={28}/>}
+                      </button>
+                    </div>
+                  ))}
+                </div>
               </div>
-            ))}
-          </div>
-        </div>
 
-        {/* PII types detected */}
-        <div className="pii-types-section mt-lg">
-          <h3 className="pii-types-title">Detected PII types</h3>
-          <p className="pii-types-sub">The following sensitive data patterns are identified and masked automatically</p>
-          <div className="pii-types-grid">
-            {[
-              { icon: '🪪', label: 'Aadhaar Number' },
-              { icon: '💳', label: 'PAN Card' },
-              { icon: '🛂', label: 'Passport Number' },
-              { icon: '📱', label: 'Phone Number' },
-              { icon: '📧', label: 'Email Address' },
-              { icon: '📅', label: 'Date of Birth' },
-              { icon: '💳', label: 'Credit / Debit Card' },
-              { icon: '📮', label: 'PIN Code' },
-              { icon: '🚗', label: 'Vehicle Registration' },
-              { icon: '👤', label: 'Name Field' },
-              { icon: '🏠', label: 'Address Field' },
-              { icon: '⚧', label: 'Gender Field' },
-            ].map(item => (
-              <span className="pii-type-chip" key={item.label}>
-                <span className="pii-chip-icon">{item.icon}</span> {item.label}
-              </span>
-            ))}
+              <div className="admin-card audit-card">
+                <h3><Activity size={20}/> Audit Logs</h3>
+                <div className="audit-table-wrap">
+                  <table className="audit-table">
+                    <thead><tr><th>Time</th><th>Auth0 User ID</th><th>Action</th><th>Entities Detected</th></tr></thead>
+                    <tbody>
+                      {logs.map(l => (
+                        <tr key={l.id}>
+                          <td style={{whiteSpace:'nowrap'}}>{new Date(l.timestamp).toLocaleString()}</td>
+                          <td style={{maxWidth: '120px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap'}}>{l.user_id}</td>
+                          <td><span className={`tag-${l.action === 'LOGIN' ? 'user' : 'primary'}`}>{l.action}</span></td>
+                          <td>{(l.details?.detected || []).join(', ')}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
           </div>
-        </div>
-
+        )}
       </main>
-
-      <footer>
-        <p>PII Masking App · Protect privacy, redact responsibly</p>
-      </footer>
     </div>
   );
 }

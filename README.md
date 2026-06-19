@@ -1,6 +1,17 @@
+---
+title: PII Masking App
+emoji: 🔒
+colorFrom: yellow
+colorTo: red
+sdk: docker
+app_port: 7860
+---
+
 # PII Masking App
 
 Automatically detect and redact **Personally Identifiable Information** from document images and free-form text using OCR and pattern matching — no external AI APIs required.
+
+**Live demo →** [Hugging Face Space](https://huggingface.co/spaces/BugHunterX2101/pii-masking-app)
 
 ---
 
@@ -34,12 +45,12 @@ Automatically detect and redact **Personally Identifiable Information** from doc
 flowchart TD
     Browser["🌐 Browser / React Frontend"]
 
-    Browser -->|"POST /api/upload\nmultipart/form-data"| Upload["api/upload.py\nVercel Serverless"]
-    Browser -->|"POST /api/mask-text\napplication/json"| Upload
-    Browser -->|"GET /api"| Index["api/index.py\nHealth Check"]
+    Browser -->|"POST /api/upload\nmultipart/form-data"| API["FastAPI Server\n(port 7860)"]
+    Browser -->|"POST /api/mask-text\napplication/json"| API
+    Browser -->|"GET /api"| API
 
-    Upload --> OCR["EasyOCR\nreadtext()"]
-    Upload --> Detect["detect_pii()\nRegex + Keywords"]
+    API --> OCR["EasyOCR\nreadtext()"]
+    API --> Detect["detect_pii()\nRegex + Keywords"]
 
     OCR --> Detect
     Detect -->|"PII found"| Mask["cv2.rectangle()\nBlack fill over bbox"]
@@ -52,101 +63,13 @@ flowchart TD
     JSONResp --> Browser
 
     style Browser fill:#E8DDD0,stroke:#C4714A,color:#2C2416
-    style Upload fill:#F5E0D4,stroke:#C4714A,color:#2C2416
+    style API fill:#F5E0D4,stroke:#C4714A,color:#2C2416
     style OCR fill:#DDE8DD,stroke:#6B8C6B,color:#2C2416
     style Detect fill:#DDE8DD,stroke:#6B8C6B,color:#2C2416
     style Mask fill:#FBF0DA,stroke:#D4891A,color:#2C2416
     style Redact fill:#FBF0DA,stroke:#D4891A,color:#2C2416
     style Response fill:#E8DDD0,stroke:#6B8C6B,color:#2C2416
     style JSONResp fill:#E8DDD0,stroke:#6B8C6B,color:#2C2416
-    style Index fill:#F0E9DF,stroke:#6B5D4A,color:#2C2416
-```
-
-### Request flow — image masking
-
-```mermaid
-sequenceDiagram
-    participant B as Browser
-    participant V as Vercel (upload.py)
-    participant OCR as EasyOCR Engine
-    participant CV as OpenCV
-
-    B->>V: POST /api/upload (multipart/form-data)
-    V->>V: cgi.FieldStorage.parse()
-    V->>CV: cv2.imdecode(image_bytes)
-    CV-->>V: numpy array (H×W×3)
-
-    V->>OCR: easyocr.readtext(rgb_array)
-    OCR-->>V: [(bbox, text, confidence), ...]
-
-    loop For each detected text region
-        V->>V: detect_pii(text)
-        alt PII detected
-            V->>CV: cv2.rectangle(black fill)
-            V->>V: Append to report[]
-        end
-    end
-
-    V->>CV: cv2.imencode('.jpg', masked_img)
-    CV-->>V: JPEG bytes
-
-    V-->>B: 200 image/jpeg (masked image)
-    Note over B,V: X-PII-Report: [{text, pii_types, confidence}]
-    Note over B,V: X-PII-Count: N
-    Note over B,V: Access-Control-Expose-Headers: X-PII-Report, X-PII-Count
-```
-
-### Request flow — text masking
-
-```mermaid
-sequenceDiagram
-    participant B as Browser
-    participant V as Vercel (upload.py)
-
-    B->>V: POST /api/mask-text
-    Note over B,V: {"text": "My Aadhaar is 1234 5678 9012"}
-
-    V->>V: detect_pii(text)
-    Note over V: Check 9 regex patterns
-    Note over V: Check 4 keyword groups
-
-    V->>V: Replace matches with [TYPE_MASKED] tokens
-
-    V-->>B: 200 application/json
-    Note over B,V: {original, masked, pii_found, pii_types, count}
-```
-
-### PII detection engine
-
-```mermaid
-flowchart LR
-    Input["Input text"] --> Regex["Regex patterns"]
-    Input --> Keywords["Keyword groups"]
-
-    Regex --> A["Aadhaar\n\\d{4} \\d{4} \\d{4}"]
-    Regex --> B["PAN Card\n[A-Z]{5}[0-9]{4}[A-Z]"]
-    Regex --> C["Passport\n[A-Z][0-9]{7}"]
-    Regex --> D["Phone\n[6-9]\\d{9}"]
-    Regex --> E["Email\nRFC regex"]
-    Regex --> F["Date of Birth\nDD/MM/YYYY"]
-    Regex --> G["Credit Card\n13–16 digits"]
-    Regex --> H["PIN Code\n6-digit postal"]
-    Regex --> I["Vehicle Reg\nMH 12 AB 1234"]
-
-    Keywords --> J["name / naam\n\\b boundary"]
-    Keywords --> K["address / addr\n\\b boundary"]
-    Keywords --> L["dob / born\n\\b boundary"]
-    Keywords --> M["male / female\n\\b boundary"]
-
-    A & B & C & D & E & F & G & H & I --> Out["detected types[ ]"]
-    J & K & L & M --> Out
-    Out --> Mask["Redact / mask"]
-
-    style Input fill:#E8DDD0,stroke:#C4714A,color:#2C2416
-    style Regex fill:#F5E0D4,stroke:#C4714A,color:#2C2416
-    style Keywords fill:#DDE8DD,stroke:#6B8C6B,color:#2C2416
-    style Out fill:#FBF0DA,stroke:#D4891A,color:#2C2416
-    style Mask fill:#DDE8DD,stroke:#6B8C6B,color:#2C2416
 ```
 
 ---
@@ -156,43 +79,36 @@ flowchart LR
 ```
 pii-masking-app/
 │
-├── api/                            Vercel serverless functions
-│   ├── index.py                    GET /api — health check + endpoint list
-│   ├── upload.py                   POST /api/upload + POST /api/mask-text
-│   ├── requirements.txt            Python deps for Vercel (headless, minimal)
-│   └── processed/
-│       └── [filename].py           GET /api/processed/:file — serve masked images
+├── Dockerfile                      Multi-stage: Node build + Python runtime
+├── .dockerignore                   Excludes node_modules, .git, etc.
+├── requirements.txt                Python deps (FastAPI, EasyOCR, OpenCV)
+├── README.md                       This file (HF Space config in frontmatter)
 │
-├── backend/                        Local development FastAPI server
-│   ├── run.py                      Entry point: uvicorn app.main:app
-│   ├── requirements.txt            Full deps including uvicorn
-│   ├── test_pii_detection.py       Unit tests for PII detection patterns
-│   └── app/
-│       └── main.py                 FastAPI app — mirrors api/upload.py logic
+├── backend/                        FastAPI server
+│   ├── app/
+│   │   └── main.py                 API endpoints + React static serving
+│   ├── run.py                      Local dev: uvicorn on port 8000
+│   ├── requirements.txt            Deps for local development
+│   └── test_pii_detection.py       Unit tests for PII detection patterns
 │
 ├── frontend/                       React 18 SPA
-│   ├── package.json                Dependencies: react, react-dom, react-scripts
-│   ├── .env.production             REACT_APP_API_URL= (empty — same-origin /api/*)
-│   ├── .env.local.example          Template: point to localhost:8000 for local dev
+│   ├── package.json                Dependencies + proxy config for local dev
 │   ├── public/
 │   │   └── index.html              HTML shell
 │   └── src/
-│       ├── index.js                ReactDOM.createRoot entry
+│       ├── index.js                ReactDOM entry
 │       ├── index.css               Minimal reset
 │       ├── App.js                  Two-tab UI: image upload + text masking
 │       └── App.css                 Design system (warm earthy palette)
 │
-├── vercel.json                     Routing: static build + serverless functions
-├── test_vercel_deployment.py       Integration tests (health, mask-text, upload)
-├── README.md                       This file
-└── DEPLOYMENT.md                   Vercel deployment walkthrough
+└── .gitignore
 ```
 
 ---
 
 ## Quick start
 
-### Option A — Local backend (FastAPI)
+### Option A — Local development (recommended)
 
 ```bash
 # 1. Clone
@@ -206,27 +122,26 @@ python run.py
 # API at http://localhost:8000
 
 # 3. Frontend (new terminal)
-cd ../frontend
-cp .env.local.example .env.local
-# .env.local already has REACT_APP_API_URL=http://localhost:8000
+cd frontend
 npm install
 npm start
-# App at http://localhost:3000
+# App at http://localhost:3000 — proxies /api/* to backend
 ```
 
-### Option B — Vercel dev (serverless locally)
+### Option B — Docker (mirrors HF Spaces)
 
 ```bash
-npm install -g vercel
-vercel dev
-# Frontend + serverless functions at http://localhost:3000
+docker build -t pii-masking-app .
+docker run -p 7860:7860 pii-masking-app
+# App at http://localhost:7860
 ```
 
-### Option C — Deploy to Vercel
+### Option C — Deploy to Hugging Face Spaces
 
-```bash
-vercel --prod
-```
+1. Create a new Space at [huggingface.co/new-space](https://huggingface.co/new-space)
+2. Select **Docker** as the SDK
+3. Push this repository to the Space
+4. The Space will build and deploy automatically
 
 ---
 
@@ -243,11 +158,10 @@ Upload an image; returns the masked image as JPEG binary.
 - `Content-Type: image/jpeg`
 - `X-PII-Report: [{"text": "...", "pii_types": [...], "confidence": 0.95}, ...]`
 - `X-PII-Count: N`
-- `Access-Control-Expose-Headers: X-PII-Report, X-PII-Count`
 
 | Code | Reason |
 |---|---|
-| 400 | No file field / empty file / not an image |
+| 400 | No file / empty file / not an image |
 | 500 | OCR or image processing error |
 
 ---
@@ -284,9 +198,6 @@ Health check — returns version and available endpoints.
 # Unit tests (PII pattern logic, no OCR required)
 cd backend
 python test_pii_detection.py
-
-# Integration tests (requires running server)
-python test_vercel_deployment.py --base-url http://localhost:8000
 ```
 
 ---
@@ -297,18 +208,17 @@ python test_vercel_deployment.py --base-url http://localhost:8000
 |---|---|---|
 | Frontend | React 18 | SPA with drag-and-drop, two-tab interface |
 | Fonts | Playfair Display, Source Sans 3 | Warm serif + clean body pairing |
-| API (serverless) | Python `BaseHTTPRequestHandler` | Vercel-compatible handlers |
-| API (local dev) | FastAPI + Uvicorn | Full-featured local server |
+| API | FastAPI + Uvicorn | High-performance async Python server |
 | OCR | EasyOCR 1.7.2 | Text extraction from images |
 | Image processing | OpenCV headless 4.8 | Decode, rectangle masking, re-encode |
 | Pattern matching | Python `re` | Compiled regex for all PII types |
-| Deployment | Vercel | Static CDN + Python serverless functions |
+| Deployment | Hugging Face Spaces (Docker) | Container-based hosting, no size limits |
 
 ---
 
 ## Known limitations
 
-- **Ephemeral `/tmp`** — Vercel invocations don't share `/tmp`. The `/api/processed` endpoint works locally; in production the masked image is returned directly in the upload response body.
 - **OCR accuracy** — EasyOCR performs well on printed text but may miss handwritten or heavily stylised fonts.
 - **Cold starts** — First request after idle may take 10–30 s while EasyOCR loads model weights (~50 MB).
-- **File size** — Images over ~5 MB may hit Vercel's 10 MB request body limit. Compress before uploading.
+- **File size** — Very large images may cause timeouts. Compress before uploading.
+- **Ephemeral storage** — Uploaded files are not persisted between requests.

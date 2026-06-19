@@ -1,4 +1,0 @@
-# Vercel serverless function dependencies
-easyocr==1.7.2
-opencv-python-headless==4.8.1.78
-numpy>=1.24.0,<2.0.0
