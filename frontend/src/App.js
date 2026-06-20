@@ -626,7 +626,7 @@ export default function App() {
             <div className="admin-grid" style={{ display: 'grid', gridTemplateColumns: '1fr 2fr', gap: '24px' }}>
               <div className="admin-card">
                 <h3><ShieldCheck size={20}/> DLP Policies</h3>
-                <p style={{fontSize: 13, color: 'var(--text-muted)', marginBottom: 16}}>Toggle which PII entities the engine should actively mask.</p>
+                <p className="admin-card-desc">Configure active Data Loss Prevention (DLP) entities to detect and redact.</p>
                 <div className="policy-list">
                   {policies.map(p => (
                     <div className="policy-item" key={p.pii_type}>
@@ -639,8 +639,11 @@ export default function App() {
                 </div>
               </div>
               <div className="admin-card">
-                <h3><Activity size={20}/> Audit Logs <a href={`${apiUrl}/api/admin/logs/export`} style={{float:'right', fontSize:12, padding:'4px 8px', borderRadius:4, background:'var(--primary)', color:'white', textDecoration:'none'}} download>Export CSV</a></h3>
-                <p style={{fontSize: 13, color: 'var(--text-muted)', marginBottom: 16}}>Immutable record of all PII processing activity.</p>
+                <div className="admin-card-header-flex">
+                  <h3><Activity size={20}/> Audit Logs</h3>
+                  <a href={`${apiUrl}/api/admin/logs/export`} className="btn-export" download>Export CSV</a>
+                </div>
+                <p className="admin-card-desc">Immutable audit log of all system processing and authentication events.</p>
                 <div className="audit-table-wrap">
                   <table className="audit-table">
                     <thead><tr><th>Time</th><th>User (Auth0)</th><th>Action</th><th>IP Address</th></tr></thead>
@@ -663,7 +666,7 @@ export default function App() {
             {/* Component: User Management Row */}
             <div className="admin-card" style={{ marginTop: '24px' }}>
               <h3><User size={20}/> User Management & RBAC</h3>
-              <p style={{fontSize: 13, color: 'var(--text-muted)', marginBottom: 16}}>Control access privileges and promote members to administrative roles.</p>
+              <p className="admin-card-desc">Manage organizational access, roles, and administrative privileges.</p>
               <div className="audit-table-wrap">
                 <table className="audit-table">
                   <thead><tr><th>ID</th><th>Username / Auth0 Sub</th><th>Current Role</th><th>Change Role</th></tr></thead>
@@ -691,15 +694,15 @@ export default function App() {
               </div>
             </div>
             
-            <div className="admin-grid" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '24px', marginTop: '24px' }}>
+            <div className="admin-grid-2col">
               <div className="admin-card">
                 <h3><Activity size={20}/> Advanced Analytics</h3>
-                <p style={{fontSize: 13, color: 'var(--text-muted)', marginBottom: 16}}>Top PII entities detected across all time.</p>
-                <div style={{display:'flex', flexDirection:'column', gap:8}}>
+                <p className="admin-card-desc">Historical aggregation of redacted entities across the organization.</p>
+                <div className="analytics-list">
                   {analytics.map(a => (
-                    <div key={a.name} style={{display:'flex', justifyContent:'space-between', padding:8, background:'var(--card-bg)', borderRadius:4, border:'1px solid var(--border)'}}>
-                      <span style={{fontWeight:500}}>{a.name}</span>
-                      <span style={{color:'var(--primary)', fontWeight:700}}>{a.count} detections</span>
+                    <div key={a.name} className="analytics-item">
+                      <span className="analytics-name">{a.name}</span>
+                      <span className="analytics-count">{a.count} detections</span>
                     </div>
                   ))}
                   {analytics.length === 0 && <span style={{color:'var(--text-muted)'}}>No analytics data yet.</span>}
@@ -708,8 +711,8 @@ export default function App() {
 
               <div className="admin-card">
                 <h3><Settings size={20}/> Global Masking Settings</h3>
-                <p style={{fontSize: 13, color: 'var(--text-muted)', marginBottom: 16}}>Configure how PII is redacted in output files.</p>
-                <select className="role-select" value={settings.masking_style} onChange={handleSettingsChange} style={{width:'100%', padding:12}}>
+                <p className="admin-card-desc">Establish global standards for data redaction styles across all processed documents.</p>
+                <select className="settings-select" value={settings.masking_style} onChange={handleSettingsChange}>
                   <option value="LABEL">[ENTITY_MASKED] (Label)</option>
                   <option value="BLACKOUT">████████ (Blackout)</option>
                   <option value="ASTERISK">*** (Asterisk)</option>
@@ -719,17 +722,17 @@ export default function App() {
 
             <div className="admin-card" style={{ marginTop: '24px' }}>
               <h3><Type size={20}/> Custom Regex Policy Builder</h3>
-              <p style={{fontSize: 13, color: 'var(--text-muted)', marginBottom: 16}}>Define proprietary text patterns (like custom Employee IDs) to mask.</p>
-              <div style={{display:'flex', gap:8, marginBottom:16}}>
-                <input type="text" placeholder="Entity Name (e.g. EMP_ID)" value={newRegexName} onChange={e=>setNewRegexName(e.target.value)} style={{flex:1, padding:8, borderRadius:4, border:'1px solid var(--border)', background:'var(--card-bg)', color:'white'}} />
-                <input type="text" placeholder="Regex Pattern (e.g. EMP-\d{5})" value={newRegexPattern} onChange={e=>setNewRegexPattern(e.target.value)} style={{flex:2, padding:8, borderRadius:4, border:'1px solid var(--border)', background:'var(--card-bg)', color:'white', fontFamily:'monospace'}} />
+              <p className="admin-card-desc">Construct custom regular expressions to automatically detect and redact proprietary data formats.</p>
+              <div className="regex-builder-form">
+                <input type="text" className="regex-input" placeholder="Entity Name (e.g. EMP_ID)" value={newRegexName} onChange={e=>setNewRegexName(e.target.value)} />
+                <input type="text" className="regex-input font-mono" placeholder="Regex Pattern (e.g. EMP-\d{5})" value={newRegexPattern} onChange={e=>setNewRegexPattern(e.target.value)} />
                 <button className="btn-primary" onClick={handleAddRegex} disabled={!newRegexName || !newRegexPattern}>Add Rule</button>
               </div>
               <div className="policy-list">
                 {customRegex.map(p => (
                   <div className="policy-item" key={p.id}>
-                    <span style={{fontWeight: 500, fontSize: 14}}>{p.name} <span style={{fontFamily:'monospace', color:'var(--text-muted)', fontSize:12, marginLeft:8}}>{p.pattern}</span></span>
-                    <button className="toggle-btn" onClick={() => handleDeleteRegex(p.id)} style={{ color: 'var(--error)' }}>
+                    <span className="regex-name">{p.name} <span className="regex-pattern">{p.pattern}</span></span>
+                    <button className="btn-danger" onClick={() => handleDeleteRegex(p.id)}>
                       Delete
                     </button>
                   </div>
