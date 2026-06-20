@@ -126,7 +126,7 @@ export default function App() {
 
   const [logs, setLogs] = useState([]);
   const [policies, setPolicies] = useState([]);
-
+  const [users, setUsers] = useState([]);
   // Session Stats (Component 7)
   const [stats, setStats] = useState({ docs: 0, pii: 0 });
 
@@ -172,6 +172,9 @@ export default function App() {
       
       const lRes = await fetch(`${apiUrl}/api/admin/logs`, { headers: { 'Authorization': `Bearer ${token}` }});
       if(lRes.ok) setLogs(await lRes.json());
+
+      const uRes = await fetch(`${apiUrl}/api/admin/users`, { headers: { 'Authorization': `Bearer ${token}` }});
+      if(uRes.ok) setUsers(await uRes.json());
     } catch(err) {}
   }, [apiUrl, token, role]);
 
@@ -315,6 +318,22 @@ export default function App() {
         body: JSON.stringify({ pii_type: piiType, is_active: !currentStatus })
       });
       loadAdminData();
+    } catch(e) {}
+  };
+
+  const changeUserRole = async (userId, newRole) => {
+    try {
+      const res = await fetch(`${apiUrl}/api/admin/users/${userId}/role`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+        body: JSON.stringify({ role: newRole })
+      });
+      if (!res.ok) {
+        const err = await res.json();
+        alert(`Error: ${err.detail}`);
+      } else {
+        loadAdminData();
+      }
     } catch(e) {}
   };
 
@@ -590,6 +609,37 @@ export default function App() {
                     </tbody>
                   </table>
                 </div>
+              </div>
+            </div>
+            
+            {/* Component: User Management Row */}
+            <div className="admin-card" style={{ marginTop: '24px' }}>
+              <h3><User size={20}/> User Management & RBAC</h3>
+              <p style={{fontSize: 13, color: 'var(--text-muted)', marginBottom: 16}}>Control access privileges and promote members to administrative roles.</p>
+              <div className="audit-table-wrap">
+                <table className="audit-table">
+                  <thead><tr><th>ID</th><th>Username / Auth0 Sub</th><th>Current Role</th><th>Change Role</th></tr></thead>
+                  <tbody>
+                    {users.map(u => (
+                      <tr key={u.id}>
+                        <td>{u.id}</td>
+                        <td style={{fontFamily: 'monospace'}}>{u.username}</td>
+                        <td><span className={`role-badge role-${u.role}`}>{u.role}</span></td>
+                        <td>
+                          <select 
+                            className="role-select" 
+                            value={u.role}
+                            onChange={(e) => changeUserRole(u.id, e.target.value)}
+                          >
+                            <option value="user">User</option>
+                            <option value="admin">Admin</option>
+                          </select>
+                        </td>
+                      </tr>
+                    ))}
+                    {users.length === 0 && <tr><td colSpan="4" style={{textAlign:'center', color:'var(--text-muted)'}}>No users found</td></tr>}
+                  </tbody>
+                </table>
               </div>
             </div>
           </div>
