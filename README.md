@@ -123,29 +123,29 @@ subgraph DB [" Persistence Layer"]
 Postgres["PostgreSQL (NeonDB)\nUsers, Audit Logs, Policies"]
 end
 
-Browser — "1. Login Redirect" --> Auth0
-Auth0 — "2. RS256 JWT Token" --> Browser
-Browser — "3. POST /upload + Bearer JWT" --> Uvicorn
+Browser -- "1. Login Redirect" --> Auth0
+Auth0 -- "2. RS256 JWT Token" --> Browser
+Browser -- "3. POST /upload + Bearer JWT" --> Uvicorn
 Uvicorn --> CORS --> AuthMiddleware
-AuthMiddleware — "4. Verify JWT @ JWKS URI" --> Auth0
-AuthMiddleware — "5. Lookup User" --> Postgres
+AuthMiddleware -- "4. Verify JWT @ JWKS URI" --> Auth0
+AuthMiddleware -- "5. Lookup User" --> Postgres
 Uvicorn --> Endpoints
-Endpoints — "6. Stage Raw File" --> RawPrefix
-Endpoints — "7. Enqueue Task" --> Redis
-Endpoints — "8. HTTP 202 + task_id" --> Browser
-Redis — "9. Dequeue Task" --> Worker
-Worker — "10. Fetch Raw File" --> RawPrefix
-Worker — "11. OCR Request" --> GCPVision
-GCPVision — "12. Text Annotations" --> Worker
-Worker — "13. NER Detection" --> Presidio
+Endpoints -- "6. Stage Raw File" --> RawPrefix
+Endpoints -- "7. Enqueue Task" --> Redis
+Endpoints -- "8. HTTP 202 + task_id" --> Browser
+Redis -- "9. Dequeue Task" --> Worker
+Worker -- "10. Fetch Raw File" --> RawPrefix
+Worker -- "11. OCR Request" --> GCPVision
+GCPVision -- "12. Text Annotations" --> Worker
+Worker -- "13. NER Detection" --> Presidio
 Presidio --> Spacy
-Spacy — "14. Detected Entities" --> Worker
-Worker — "15. Upload Masked File" --> MaskedPrefix
-Worker — "16. Task SUCCESS + URL" --> Redis
-Browser — "17. Poll GET /tasks/:id" --> Uvicorn
-Uvicorn — "18. Fetch Result" --> Redis
-Uvicorn — "19. Return Pre-signed URL" --> Browser
-Endpoints — "Log Audit Event" --> Postgres
+Spacy -- "14. Detected Entities" --> Worker
+Worker -- "15. Upload Masked File" --> MaskedPrefix
+Worker -- "16. Task SUCCESS + URL" --> Redis
+Browser -- "17. Poll GET /tasks/:id" --> Uvicorn
+Uvicorn -- "18. Fetch Result" --> Redis
+Uvicorn -- "19. Return Pre-signed URL" --> Browser
+Endpoints -- "Log Audit Event" --> Postgres
 ```
 
 ---
