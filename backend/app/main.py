@@ -150,17 +150,22 @@ def sync_user(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)
     sub = payload.get("sub")
     
     user = db.query(models.User).filter(models.User.username == sub).first()
+    
+    # Check environment variable whitelist for admin promotion
+    admin_emails = [e.strip() for e in os.getenv("ADMIN_EMAILS", "").split(",") if e.strip()]
+    user_email = payload.get("email", "")
+    correct_role = "admin" if user_email and user_email in admin_emails else "user"
+
     if not user:
-        # Check environment variable whitelist for admin promotion
-        admin_emails = [e.strip() for e in os.getenv("ADMIN_EMAILS", "").split(",") if e.strip()]
-        user_email = payload.get("email", "")
-        
-        role = "admin" if user_email and user_email in admin_emails else "user"
         # We store Auth0 'sub' in username field. Hashed password is N/A for SSO.
-        user = models.User(username=sub, hashed_password="SSO", role=role)
+        user = models.User(username=sub, hashed_password="SSO", role=correct_role)
         db.add(user)
-        db.commit()
-        db.refresh(user)
+    else:
+        # Always sync the user's role on login to ensure Zero-Trust compliance
+        user.role = correct_role
+        
+    db.commit()
+    db.refresh(user)
         
     ip = request.client.host if request and request.client else "N/A"
     log_audit(db, user.id, "LOGIN", ip, {"provider": "Auth0"})
@@ -175,33 +180,6 @@ def get_users(db: Session = Depends(get_db), current_user: models.User = Depends
     users = db.query(models.User).order_by(models.User.id.asc()).all()
     return [{"id": u.id, "username": u.username, "role": u.role} for u in users]
 
-class UserRoleUpdate(BaseModel):
-    role: str
-
-@app.put("/api/admin/users/{user_id}/role")
-def update_user_role(user_id: int, update: UserRoleUpdate, db: Session = Depends(get_db), current_user: models.User = Depends(require_admin)):
-    if update.role not in ["admin", "user"]:
-        raise HTTPException(status_code=400, detail="Invalid role specified")
-        
-    target_user = db.query(models.User).filter(models.User.id == user_id).first()
-    if not target_user:
-        raise HTTPException(status_code=404, detail="User not found")
-        
-    if target_user.id == current_user.id and update.role != "admin":
-        raise HTTPException(status_code=400, detail="Admins cannot demote themselves")
-        
-    old_role = target_user.role
-    target_user.role = update.role
-    
-    # Audit log
-    log_audit(db, current_user.id, "UPDATE_USER_ROLE", "N/A", {
-        "target_user_id": target_user.id,
-        "old_role": old_role,
-        "new_role": update.role
-    })
-    
-    db.commit()
-    return {"msg": f"User {target_user.username} role updated to {update.role}"}
 
 @app.get("/api/admin/logs")
 def get_audit_logs(db: Session = Depends(get_db), current_user: models.User = Depends(require_admin)):

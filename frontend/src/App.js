@@ -153,6 +153,7 @@ export default function App() {
   const [analytics, setAnalytics] = useState([]);
   const [newRegexName, setNewRegexName] = useState('');
   const [newRegexPattern, setNewRegexPattern] = useState('');
+  const [adminError, setAdminError] = useState('');
   // Session Stats (Component 7)
   const [stats, setStats] = useState({ docs: 0, pii: 0 });
 
@@ -221,37 +222,55 @@ export default function App() {
   }, [apiUrl, token, role]);
 
   const handleAddRegex = async () => {
+    setAdminError('');
     try {
-      await fetch(`${apiUrl}/api/admin/custom-regex`, {
+      const res = await fetch(`${apiUrl}/api/admin/custom-regex`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
         body: JSON.stringify({ name: newRegexName, pattern: newRegexPattern })
       });
+      handleApiError(res);
+      if (!res.ok) {
+        const data = await res.json().catch(()=>({}));
+        throw new Error(data.detail || 'Failed to add regex.');
+      }
       setNewRegexName(''); setNewRegexPattern('');
       loadAdminData();
-    } catch(e) {}
+    } catch(e) {
+      setAdminError(e.message);
+    }
   };
   
   const handleDeleteRegex = async (id) => {
+    setAdminError('');
     try {
-      await fetch(`${apiUrl}/api/admin/custom-regex/${id}`, {
+      const res = await fetch(`${apiUrl}/api/admin/custom-regex/${id}`, {
         method: 'DELETE',
         headers: { 'Authorization': `Bearer ${token}` }
       });
+      handleApiError(res);
+      if (!res.ok) throw new Error('Failed to delete regex.');
       loadAdminData();
-    } catch(e) {}
+    } catch(e) {
+      setAdminError(e.message);
+    }
   };
 
   const handleSettingsChange = async (e) => {
     const val = e.target.value;
     setSettings({ masking_style: val });
+    setAdminError('');
     try {
-      await fetch(`${apiUrl}/api/admin/settings`, {
+      const res = await fetch(`${apiUrl}/api/admin/settings`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
         body: JSON.stringify({ masking_style: val })
       });
-    } catch(e) {}
+      handleApiError(res);
+      if (!res.ok) throw new Error('Failed to update settings.');
+    } catch(e) {
+      setAdminError(e.message);
+    }
   };
 
   useEffect(() => {
@@ -394,30 +413,19 @@ export default function App() {
   };
 
   const togglePolicy = async (piiType, currentStatus) => {
+    setAdminError('');
     try {
-      await fetch(`${apiUrl}/api/admin/policies`, {
+      const res = await fetch(`${apiUrl}/api/admin/policies`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
         body: JSON.stringify({ pii_type: piiType, is_active: !currentStatus })
       });
+      handleApiError(res);
+      if (!res.ok) throw new Error('Failed to toggle policy.');
       loadAdminData();
-    } catch(e) {}
-  };
-
-  const changeUserRole = async (userId, newRole) => {
-    try {
-      const res = await fetch(`${apiUrl}/api/admin/users/${userId}/role`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
-        body: JSON.stringify({ role: newRole })
-      });
-      if (!res.ok) {
-        const err = await res.json();
-        alert(`Error: ${err.detail}`);
-      } else {
-        loadAdminData();
-      }
-    } catch(e) {}
+    } catch(e) {
+      setAdminError(e.message);
+    }
   };
 
   if (authLoading) {
@@ -659,9 +667,12 @@ export default function App() {
 
         {tab === 'admin' && role === 'admin' && (
           <div className="admin-section">
-            <div className="admin-grid" style={{ display: 'grid', gridTemplateColumns: '1fr 2fr', gap: '24px' }}>
-              <div className="admin-card">
-                <h3><ShieldCheck size={20}/> DLP Policies</h3>
+              {adminError && <div className="alert alert-error" style={{marginBottom: '16px'}}><AlertTriangle size={18} /> {adminError}</div>}
+
+              <div className="admin-grid-2col">
+                {/* Component: Detection Policies UI */}
+                <div className="admin-card">
+                  <h3><ShieldCheck size={20}/> Detection Policies</h3>
                 <p className="admin-card-desc">Configure active Data Loss Prevention (DLP) entities to detect and redact.</p>
                 <div className="policy-list">
                   {policies.map(p => (
@@ -702,29 +713,19 @@ export default function App() {
             {/* Component: User Management Row */}
             <div className="admin-card" style={{ marginTop: '24px' }}>
               <h3><User size={20}/> User Management & RBAC</h3>
-              <p className="admin-card-desc">Manage organizational access, roles, and administrative privileges.</p>
+              <p className="admin-card-desc">Users and roles are strictly synchronized with the server's environment variable whitelist.</p>
               <div className="audit-table-wrap">
                 <table className="audit-table">
-                  <thead><tr><th>ID</th><th>Username / Auth0 Sub</th><th>Current Role</th><th>Change Role</th></tr></thead>
+                  <thead><tr><th>ID</th><th>Username / Auth0 Sub</th><th>Assigned Role</th></tr></thead>
                   <tbody>
                     {users.map(u => (
                       <tr key={u.id}>
                         <td>{u.id}</td>
                         <td style={{fontFamily: 'monospace'}}>{u.username}</td>
                         <td><span className={`role-badge role-${u.role}`}>{u.role}</span></td>
-                        <td>
-                          <select 
-                            className="role-select" 
-                            value={u.role}
-                            onChange={(e) => changeUserRole(u.id, e.target.value)}
-                          >
-                            <option value="user">User</option>
-                            <option value="admin">Admin</option>
-                          </select>
-                        </td>
                       </tr>
                     ))}
-                    {users.length === 0 && <tr><td colSpan="4" style={{textAlign:'center', color:'var(--text-muted)'}}>No users found</td></tr>}
+                    {users.length === 0 && <tr><td colSpan="3" style={{textAlign:'center', color:'var(--text-muted)'}}>No users found</td></tr>}
                   </tbody>
                 </table>
               </div>
