@@ -44,6 +44,19 @@ def _apply_custom_regex(text: str, custom_patterns: list):
             pass # Ignore invalid regex
     return results
 
+def _remove_overlaps(results):
+    if not results: return []
+    # Sort by start index, then descending end index (to keep the longest match if they start at the same place)
+    sorted_results = sorted(results, key=lambda x: (x.start, -x.end))
+    filtered = []
+    last_end = -1
+    for res in sorted_results:
+        # If this result starts after the previous one ends, it's not an overlap
+        if res.start >= last_end:
+            filtered.append(res)
+            last_end = max(last_end, res.end)
+    return filtered
+
 def detect_and_mask_text(text: str, active_entities: list[str], masking_style: str = "LABEL", custom_patterns: list = None) -> dict:
     """
     Use Presidio to analyze and mask text based on active policies and custom regex.
@@ -56,6 +69,9 @@ def detect_and_mask_text(text: str, active_entities: list[str], masking_style: s
     
     # Add custom regex results
     results.extend(_apply_custom_regex(text, custom_patterns))
+    
+    # CRITICAL FIX: Presidio Anonymizer crashes if there are overlapping entities
+    results = _remove_overlaps(results)
     
     if not results:
         return {"found": False, "types": [], "redacted": text}
@@ -91,5 +107,6 @@ def detect_raw(text: str, active_entities: list[str], custom_patterns: list = No
         return []
     results = _get_analyzer().analyze(text=text, entities=active_entities, language='en') if active_entities else []
     results.extend(_apply_custom_regex(text, custom_patterns))
-    return results
+    # Remove overlaps to prevent downstream processing errors
+    return _remove_overlaps(results)
 

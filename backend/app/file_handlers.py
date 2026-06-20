@@ -57,6 +57,8 @@ def process_pdf(file_bytes: bytes, active_entities: list[str], detect_raw_fn, cu
                 found_types.add(res.entity_type)
                 # Get the exact substring that was flagged
                 substring = text[res.start:res.end]
+                if not substring.strip():
+                    continue
                 
                 # Find it on the page
                 quads = page.search_for(substring)
@@ -95,6 +97,9 @@ def mask_pii_in_image_gcp(image_bytes: bytes, active_entities: list[str], detect
     # Decode image using OpenCV for drawing
     nparr = np.frombuffer(image_bytes, np.uint8)
     img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+    if img is None:
+        raise Exception("Failed to decode image using OpenCV.")
+        
     masked = img.copy()
     report = []
     
@@ -114,7 +119,8 @@ def mask_pii_in_image_gcp(image_bytes: bytes, active_entities: list[str], detect
         pii_string = full_text[res.start:res.end]
         found_types.add(res.entity_type)
         words = re.findall(r'\w+', pii_string)
-        flagged_words.update(w.lower() for w in words if len(w) > 1)
+        # Include all parts of the PII string, even short ones, to ensure complete redaction
+        flagged_words.update(w.lower() for w in words if w.strip())
         
     # 4. Redact individual Vision bounding boxes if their word matches a flagged word
     for text_annotation in texts[1:]:
