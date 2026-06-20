@@ -15,11 +15,11 @@
 <br/>
 
 > **Every document your company handles is a potential data breach waiting to happen.** 
-> The Enterprise Privacy Suite is an automated, cloud-native DLP pipeline that detects and permanently redacts sensitive PII from documents -- *before* they ever reach your database, your support agents, or your AI models.
+> The Enterprise Privacy Suite is an automated, cloud-native DLP pipeline that detects and permanently redacts sensitive PII from documents — *before* they ever reach your database, your support agents, or your AI models.
 
 <br/>
 
-**[Live Demo](https://huggingface.co/spaces/vedit2101/pii-masking-app)** &nbsp;|&nbsp; **[Report a Bug](https://github.com/BugHunterX2101/pii-masking-app/issues)** &nbsp;|&nbsp; **[Request a Feature](https://github.com/BugHunterX2101/pii-masking-app/issues)**
+**[Live Demo](https://huggingface.co/spaces/vedit2101/pii-masking-app)** &nbsp;|·&nbsp; **[Report a Bug](https://github.com/BugHunterX2101/pii-masking-app/issues)** &nbsp;|·&nbsp; **[Request a Feature](https://github.com/BugHunterX2101/pii-masking-app/issues)**
 
 </div>
 
@@ -36,15 +36,14 @@
 8. [Supported PII Entity Types](#supported-pii-entity-types)
 9. [Local Development Setup](#local-development-setup)
 10. [API Reference](#api-reference)
-11. [Business Use Cases](#business-use-cases)
-12. [Compliance Coverage](#compliance-coverage)
-13. [Project Structure](#project-structure)
+11. [Compliance Coverage](#compliance-coverage)
+12. [Project Structure](#project-structure)
 
 ---
 
 ## The Problem We Solve
 
-Every day, organizations deal with a ticking compliance time bomb: **unstructured documents** containing raw PII. Whether it is a customer uploading their Aadhaar card for KYC, an HR team storing resumes with home addresses, or engineers feeding production SQL dumps into an AI model -- **sensitive data is everywhere, and most of it is completely unprotected**.
+Every day, organizations deal with a ticking compliance time bomb: **unstructured documents** containing raw PII. Whether it is a customer uploading their Aadhaar card for KYC, an HR team storing resumes with home addresses, or engineers feeding production SQL dumps into an AI model — **sensitive data is everywhere, and most of it is completely unprotected**.
 
 | Without This Tool | With Enterprise Privacy Suite |
 |---|---|
@@ -60,8 +59,8 @@ Every day, organizations deal with a ticking compliance time bomb: **unstructure
 
 ### AI-Powered Dual Detection Engine
 Unlike rule-based tools that only catch "known patterns," this system uses a **two-layer detection pipeline**:
-1. **Google Cloud Vision API** -- Performs server-side OCR, extracting every character from scanned images, IDs, and screenshots with state-of-the-art accuracy, even on low-quality images.
-2. **Microsoft Presidio (NLP)** -- Runs named-entity recognition (NER) on the extracted text using SpaCy's `en_core_web_lg` model to catch contextual PII (like names in a sentence) that regex alone would miss.
+1. **Google Cloud Vision API** — Performs server-side OCR, extracting every character from scanned images, IDs, and screenshots with state-of-the-art accuracy, even on low-quality images.
+2. **Microsoft Presidio (NLP)** — Runs named-entity recognition (NER) on the extracted text using SpaCy's `en_core_web_lg` model to catch contextual PII (like names in a sentence) that regex alone would miss.
 
 ### Event-Driven Asynchronous Architecture
 Large files (multi-page PDFs, high-res images) can take several seconds to process. In a synchronous system, this would cause HTTP timeouts, thread starvation, and a terrible user experience. This suite uses a **full event-driven pipeline**:
@@ -124,29 +123,29 @@ subgraph DB [" Persistence Layer"]
 Postgres["PostgreSQL (NeonDB)\nUsers, Audit Logs, Policies"]
 end
 
-Browser -- "1. Login Redirect" --> Auth0
-Auth0 -- "2. RS256 JWT Token" --> Browser
-Browser -- "3. POST /upload + Bearer JWT" --> Uvicorn
+Browser — "1. Login Redirect" --> Auth0
+Auth0 — "2. RS256 JWT Token" --> Browser
+Browser — "3. POST /upload + Bearer JWT" --> Uvicorn
 Uvicorn --> CORS --> AuthMiddleware
-AuthMiddleware -- "4. Verify JWT @ JWKS URI" --> Auth0
-AuthMiddleware -- "5. Lookup User" --> Postgres
+AuthMiddleware — "4. Verify JWT @ JWKS URI" --> Auth0
+AuthMiddleware — "5. Lookup User" --> Postgres
 Uvicorn --> Endpoints
-Endpoints -- "6. Stage Raw File" --> RawPrefix
-Endpoints -- "7. Enqueue Task" --> Redis
-Endpoints -- "8. HTTP 202 + task_id" --> Browser
-Redis -- "9. Dequeue Task" --> Worker
-Worker -- "10. Fetch Raw File" --> RawPrefix
-Worker -- "11. OCR Request" --> GCPVision
-GCPVision -- "12. Text Annotations" --> Worker
-Worker -- "13. NER Detection" --> Presidio
+Endpoints — "6. Stage Raw File" --> RawPrefix
+Endpoints — "7. Enqueue Task" --> Redis
+Endpoints — "8. HTTP 202 + task_id" --> Browser
+Redis — "9. Dequeue Task" --> Worker
+Worker — "10. Fetch Raw File" --> RawPrefix
+Worker — "11. OCR Request" --> GCPVision
+GCPVision — "12. Text Annotations" --> Worker
+Worker — "13. NER Detection" --> Presidio
 Presidio --> Spacy
-Spacy -- "14. Detected Entities" --> Worker
-Worker -- "15. Upload Masked File" --> MaskedPrefix
-Worker -- "16. Task SUCCESS + URL" --> Redis
-Browser -- "17. Poll GET /tasks/:id" --> Uvicorn
-Uvicorn -- "18. Fetch Result" --> Redis
-Uvicorn -- "19. Return Pre-signed URL" --> Browser
-Endpoints -- "Log Audit Event" --> Postgres
+Spacy — "14. Detected Entities" --> Worker
+Worker — "15. Upload Masked File" --> MaskedPrefix
+Worker — "16. Task SUCCESS + URL" --> Redis
+Browser — "17. Poll GET /tasks/:id" --> Uvicorn
+Uvicorn — "18. Fetch Result" --> Redis
+Uvicorn — "19. Return Pre-signed URL" --> Browser
+Endpoints — "Log Audit Event" --> Postgres
 ```
 
 ---
@@ -266,7 +265,7 @@ USERS ||--o{ AUDIT_LOGS : "generates"
 | **Frontend** | React | 18 | Component-driven SPA, Auth0 SDK |
 | **UI Library** | Lucide React + Vanilla CSS | Latest | Zero dependency, dark-mode glassmorphism |
 | **Backend** | FastAPI | 0.110+ | Async-native Python, OpenAPI auto-docs |
-| **Auth** | Auth0 (RS256 JWT) | -- | Enterprise SSO; no password management |
+| **Auth** | Auth0 (RS256 JWT) | — | Enterprise SSO; no password management |
 | **ORM** | SQLAlchemy + Alembic | 2.0 | Type-safe DB sessions, migration support |
 | **Database** | PostgreSQL (NeonDB) | 16 | Serverless Postgres; scales to zero |
 | **Task Queue** | Celery | 5.3.6 | Distributed async workers; Redis backend |
@@ -322,22 +321,22 @@ cp .env.example .env
 
 ### 2. Environment Variables
 ```env
-# -- Database -----------------------------------------------
+# — Database -----------------------------------------------
 DATABASE_URL=postgresql://user:password@localhost:5432/pii_masking
 
-# -- AWS S3 -------------------------------------------------
+# — AWS S3 -------------------------------------------------
 AWS_REGION=us-east-2
 S3_BUCKET_NAME=pii-mask-ocr-files
 AWS_ACCESS_KEY_ID=AKIAXXXXXXXXXXXXXXXX
 AWS_SECRET_ACCESS_KEY=xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 
-# -- Redis (Celery Broker & Backend) ------------------------
+# — Redis (Celery Broker & Backend) ------------------------
 REDIS_URL=redis://localhost:6379/0
 
-# -- Auth0 SSO ----------------------------------------------
+# — Auth0 SSO ----------------------------------------------
 AUTH0_DOMAIN=your-tenant.us.auth0.com
 
-# -- GCP Vision (path to service account JSON) --------------
+# — GCP Vision (path to service account JSON) --------------
 GOOGLE_APPLICATION_CREDENTIALS=/path/to/your-gcp-key.json
 ```
 
@@ -366,7 +365,7 @@ npm install
 echo "REACT_APP_API_URL=http://localhost:8000" > .env.local
 
 npm start
-# -> App available at http://localhost:3000
+# → App available at http://localhost:3000
 ```
 
 ### 5. Run via Docker (Single Command)
@@ -405,38 +404,20 @@ curl -X POST https://your-app/api/upload \
 -H "Authorization: Bearer $TOKEN" \
 -F "file=@sensitive_doc.pdf"
 
-# -> Response: {"status": "accepted", "task_id": "abc-123", "message": "..."}
+# → Response: {"status": "accepted", "task_id": "abc-123", "message": "..."}
 
 # 2. Poll for result (repeat until status == "SUCCESS")
 curl https://your-app/api/tasks/abc-123 \
 -H "Authorization: Bearer $TOKEN"
 
-# -> Response: {"task_id": "abc-123", "status": "SUCCESS",
+# → Response: {"task_id": "abc-123", "status": "SUCCESS",
 # "result": {"download_url": "https://s3.amazonaws.com/...", "report": [...]}}
 ```
 
----
-
-## Business Use Cases
-
-### Banking & Financial Services (KYC Automation)
-Banks receive thousands of customer identity documents per day (Aadhaar, PAN, Passports). Before a support agent reviews a KYC ticket, every document is automatically routed through the Privacy Suite, which blacks out all biometric identifiers. Agents see redacted documents; real numbers only exist in the encrypted core banking system.
-
-### Generative AI & LLM Data Engineering
-Companies building internal AI assistants (RAG systems on internal wikis, tickets, chats) cannot safely train models if the data contains real customer PII. This suite acts as a **Privacy Firewall**: every document chunk is sanitized via `/api/mask-text` before being embedded and indexed into the vector database.
-
-###  HR & Talent Acquisition (Blind Hiring)
-Anonymize inbound resumes at ingestion -- names, addresses, and dates of birth are automatically masked -- enabling statistically unbiased shortlisting by hiring managers.
-
-### Healthcare Data Anonymization
-Patient records and lab reports are de-identified on upload (names, phone numbers, dates), allowing research teams to generate compliant anonymized datasets for clinical studies without manual redaction.
-
-### Bug Bounty & Security Reporting
-Security researchers submitting proof-of-concept reports often leak real user data in screenshots and logs. A bug bounty platform can process all inbound reports through the Privacy Suite to protect end-users automatically.
 
 ---
 
-##  Compliance Coverage
+## Compliance Coverage
 
 | Standard | How This Suite Helps |
 |---|---|
@@ -452,24 +433,24 @@ Security researchers submitting proof-of-concept reports often leak real user da
 
 ```
 pii-masking-app/
-|-- backend/
-| |-- app/
-| |-- main.py # FastAPI app: routes, middleware, S3 helpers
-| |-- worker.py # Celery task: full async document processing pipeline
-| |-- auth.py # Auth0 JWT validation (RS256)
-| |-- models.py # SQLAlchemy ORM: User, AuditLog, DLPPolicy
-| |-- database.py # DB engine & session factory
-| |-- pii_engine.py # Microsoft Presidio NLP detection + masking
-| |-- file_handlers.py # PDF (PyMuPDF) & Word (python-docx) processors
-|-- frontend/
-| |-- src/
-| |--  App.js # Main React app: Auth0, polling, UI state
-| |-- App.css # Dark-mode glassmorphism design system
-| |--  index.js # Auth0Provider, app bootstrap
-|-- Dockerfile # Multi-stage build (Node -> Python)
-|--  supervisord.conf # Process orchestration: Redis + FastAPI + Celery
-|-- requirements.txt # Python dependencies
-|-- README.md # You are here
+├── backend/
+| ├── app/
+| ├── main.py # FastAPI app: routes, middleware, S3 helpers
+| ├── worker.py # Celery task: full async document processing pipeline
+| ├── auth.py # Auth0 JWT validation (RS256)
+| ├── models.py # SQLAlchemy ORM: User, AuditLog, DLPPolicy
+| ├── database.py # DB engine & session factory
+| ├── pii_engine.py # Microsoft Presidio NLP detection + masking
+| ├── file_handlers.py # PDF (PyMuPDF) & Word (python-docx) processors
+├── frontend/
+| ├── src/
+│   ├── App.js          # Main React app: Auth0, polling, UI state
+| ├── App.css # Dark-mode glassmorphism design system
+│   ├── index.js        # Auth0Provider, app bootstrap
+├── Dockerfile # Multi-stage build (Node → Python)
+├── supervisord.conf    # Process orchestration: Redis + FastAPI + Celery
+├── requirements.txt # Python dependencies
+├── README.md # You are here
 ```
 
 ---
@@ -484,7 +465,7 @@ pii-masking-app/
 | **Zero Plaintext Storage** | Raw files are staged temporarily; only masked outputs are persisted |
 | **Multi-Cloud** | Auth0 (Identity) + GCP (OCR) + AWS (Storage) + NeonDB (Database) |
 | **Horizontally Scalable** | Add more Celery workers to any node; Redis broker coordinates automatically |
-| **Enterprise-Ready** | RBAC, Audit Logs, Policy Management, SSO -- all production-grade |
+| **Enterprise-Ready** | RBAC, Audit Logs, Policy Management, SSO — all production-grade |
 
 <br/>
 
@@ -492,8 +473,8 @@ pii-masking-app/
 
 <br/>
 
-**Built with  -- combining Cloud, AI, and Security into a single production-grade application.**
+**Built with care — combining Cloud, AI, and Security into a single production-grade application.**
 
-*If this project helped you or impressed you, please give it a -- it means a lot!*
+*If this project helped you or impressed you, please star it — it means a lot!*
 
 </div>
