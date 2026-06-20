@@ -3,24 +3,49 @@ import { useAuth0 } from '@auth0/auth0-react';
 import { 
   Search, Image as ImageIcon, Type, CheckCircle, FileText, Lock, 
   AlertTriangle, Download, RefreshCw, UploadCloud, ScanLine, 
-  ShieldCheck, LogOut, Settings, Activity, ToggleLeft, ToggleRight, User
+  ShieldCheck, LogOut, Settings, Activity, ToggleLeft, ToggleRight, User,
+  ShieldAlert, Layers, Cpu, Zap
 } from 'lucide-react';
+import confetti from 'canvas-confetti';
 import './App.css';
 
 const tagClass = (type) => `report-tag tag-default`;
 const formatType = (t) => t.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
 
+// Component 4: Masked Token "Redaction Bar" Style
 function MaskedText({ text }) {
   const parts = text.split(/(\[[A-Z_]+_MASKED\])/g);
   return (
     <>
-      {parts.map((part, i) =>
-        part.match(/^\[[A-Z_]+_MASKED\]$/)
-          ? <span key={i} className="masked-token">{part}</span>
-          : <span key={i}>{part}</span>
-      )}
+      {parts.map((part, i) => {
+        const match = part.match(/^\[([A-Z_]+)_MASKED\]$/);
+        if (match) {
+          return <span key={i} className="redaction-bar" title={`Redacted: ${formatType(match[1])}`}>█████</span>;
+        }
+        return <span key={i}>{part}</span>;
+      })}
     </>
   );
+}
+
+// Component 5: Slide-In Detection Report with Number Odometer
+function OdometerCount({ endCount }) {
+  const [count, setCount] = useState(0);
+  useEffect(() => {
+    let start = 0;
+    const duration = 1000;
+    const stepTime = Math.abs(Math.floor(duration / (endCount || 1)));
+    const timer = setInterval(() => {
+      start += 1;
+      if (start > endCount) {
+        clearInterval(timer);
+      } else {
+        setCount(start);
+      }
+    }, stepTime);
+    return () => clearInterval(timer);
+  }, [endCount]);
+  return <span className="report-count">{count} item{count !== 1 ? 's' : ''} found</span>;
 }
 
 function DetectionReport({ report }) {
@@ -29,7 +54,7 @@ function DetectionReport({ report }) {
     <div className="report-section">
       <div className="report-header">
         <h3><Search size={18} /> Detection Report</h3>
-        <span className="report-count">{report.length} item{report.length !== 1 ? 's' : ''} found</span>
+        <OdometerCount endCount={report.length} />
       </div>
       <div className="report-body">
         {report.length === 0 ? (
@@ -54,6 +79,30 @@ function DetectionReport({ report }) {
   );
 }
 
+// Component 8: Before/After Image Reveal Slider
+function ImageReveal({ original, masked }) {
+  const [sliderPos, setSliderPos] = useState(50);
+  
+  if (!original) {
+    return <img src={masked} alt="Masked Document" />;
+  }
+
+  return (
+    <div className="image-compare-wrapper">
+      <img className="img-original" src={original} alt="Original" />
+      <img className="img-masked" src={masked} alt="Masked" style={{ clipPath: `inset(0 0 0 ${sliderPos}%)` }} />
+      <div className="slider-handle" style={{ left: `${sliderPos}%` }}></div>
+      <input 
+        type="range" 
+        min="0" max="100" 
+        value={sliderPos} 
+        onChange={(e) => setSliderPos(e.target.value)}
+        className="compare-range" 
+      />
+    </div>
+  );
+}
+
 export default function App() {
   const { isAuthenticated, isLoading: authLoading, loginWithRedirect, logout, getIdTokenClaims, user } = useAuth0();
   
@@ -63,6 +112,7 @@ export default function App() {
   const [tab, setTab] = useState('file');
 
   const [file, setFile] = useState(null);
+  const [originalPreview, setOriginalPreview] = useState(null);
   const [processedUrl, setProcessedUrl] = useState(null);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState('');
@@ -77,10 +127,19 @@ export default function App() {
   const [logs, setLogs] = useState([]);
   const [policies, setPolicies] = useState([]);
 
+  // Session Stats (Component 7)
+  const [stats, setStats] = useState({ docs: 0, pii: 0 });
+
   const fileInputRef = useRef(null);
   const apiUrl = process.env.REACT_APP_API_URL || '';
 
-  // Sync Auth0 user with backend and retrieve role
+  // Component 2: Risk Score & Character Count
+  const charCount = inputText.length;
+  const riskMatches = inputText.match(/\b\d{4}\s?\d{4}\s?\d{4}\b|\b[\w.-]+@[\w.-]+\.\w{2,}\b|\b\d{10}\b/g) || [];
+  const riskScore = riskMatches.length;
+  const riskClass = riskScore === 0 ? 'risk-low' : riskScore < 3 ? 'risk-medium' : 'risk-high';
+  const riskLabel = riskScore === 0 ? 'Low Risk' : riskScore < 3 ? 'Medium Risk' : 'High Risk';
+
   useEffect(() => {
     const syncUser = async () => {
       if (isAuthenticated) {
@@ -89,7 +148,6 @@ export default function App() {
           const jwtToken = claims.__raw;
           setToken(jwtToken);
 
-          // Call backend to sync user & fetch role
           const res = await fetch(`${apiUrl}/api/auth/sync`, {
             method: 'POST',
             headers: { 'Authorization': `Bearer ${jwtToken}` }
@@ -134,7 +192,19 @@ export default function App() {
     setProcessedUrl(null);
     setReport(null);
     setError('');
+    
+    // For Before/After image slider
+    if (selectedFile.type.startsWith('image/')) {
+      const url = URL.createObjectURL(selectedFile);
+      setOriginalPreview(url);
+    } else {
+      setOriginalPreview(null);
+    }
   }, []);
+
+  const triggerConfetti = () => {
+    confetti({ particleCount: 100, spread: 70, origin: { y: 0.6 }, colors: ['#06B6D4', '#3B82F6', '#FFFFFF'] });
+  };
 
   const handleProcess = async () => {
     if (!file) { setError('Please select a file first.'); return; }
@@ -163,12 +233,12 @@ export default function App() {
       if (res.status === 202 && data.task_id) {
         pollTaskStatus(data.task_id);
       } else {
-        // Fallback if backend responds synchronously
         setProcessedUrl(data.download_url);
         setReport(data.report);
         setIsLoading(false);
+        triggerConfetti();
+        setStats(s => ({ docs: s.docs + 1, pii: s.pii + (data.report?.length || 0) }));
       }
-
     } catch (err) {
       setError(err.message || 'Processing failed.');
       setIsLoading(false);
@@ -187,11 +257,12 @@ export default function App() {
         setProcessedUrl(data.result.download_url);
         setReport(data.result.report);
         setIsLoading(false);
+        triggerConfetti(); // Component 9: Confetti Burst
+        setStats(s => ({ docs: s.docs + 1, pii: s.pii + (data.result.report?.length || 0) }));
       } else if (data.status === 'FAILURE') {
         setError(data.error || 'Task failed during processing.');
         setIsLoading(false);
       } else {
-        // Still processing, poll again in 2 seconds
         setTimeout(() => pollTaskStatus(taskId), 2000);
       }
     } catch (err) {
@@ -202,6 +273,7 @@ export default function App() {
 
   const handleReset = () => {
     setFile(null);
+    setOriginalPreview(null);
     setProcessedUrl(null);
     setReport(null);
     setError('');
@@ -225,7 +297,9 @@ export default function App() {
       });
       handleApiError(res);
       if (!res.ok) throw new Error('Text analysis failed.');
-      setTextResult(await res.json());
+      const data = await res.json();
+      setTextResult(data);
+      setStats(s => ({ ...s, pii: s.pii + (data.report?.length || 0) }));
     } catch (err) {
       setTextError(err.message || 'Text analysis failed.');
     } finally {
@@ -271,6 +345,20 @@ export default function App() {
   return (
     <div className="App">
       <div className="bg-pattern" />
+      
+      {/* Component 7: Sidebar Stats Panel */}
+      <aside className="stats-sidebar">
+        <div className="sidebar-title"><Activity size={14} style={{display:'inline', marginBottom:'-2px', marginRight:'4px'}}/> Session Activity</div>
+        <div className="stat-item">
+          <span className="stat-label">Documents Processed</span>
+          <span className="stat-value">{stats.docs}</span>
+        </div>
+        <div className="stat-item">
+          <span className="stat-label">PII Items Redacted</span>
+          <span className="stat-value highlight">{stats.pii}</span>
+        </div>
+      </aside>
+
       <header className="App-header">
         <div className="header-top-right" style={{ display: 'flex', alignItems: 'center', gap: '16px' }}>
           <span style={{ color: 'var(--text-muted)', display: 'flex', alignItems: 'center', gap: '6px' }}>
@@ -288,7 +376,39 @@ export default function App() {
         </div>
       </header>
 
+      {/* Component 6: Micro Status Bar */}
+      <div className="micro-status-bar">
+        <div className="status-indicator"><div className="status-dot online"></div> Auth0 Connected</div>
+        <div className="status-indicator"><div className="status-dot online"></div> Redis Queue Ready</div>
+        <div className="status-indicator"><div className="status-dot online"></div> GCP Vision Active</div>
+      </div>
+
       <main className="App-main">
+        {/* Component 10: Glassmorphism Stat Cards */}
+        <div className="stat-cards-container">
+          <div className="glass-stat-card">
+            <div className="stat-icon-wrap"><Layers size={20} /></div>
+            <div className="stat-card-content">
+              <h4>Supported Formats</h4>
+              <p>PDF · DOCX · IMG</p>
+            </div>
+          </div>
+          <div className="glass-stat-card">
+            <div className="stat-icon-wrap"><Search size={20} /></div>
+            <div className="stat-card-content">
+              <h4>Detection Engine</h4>
+              <p>Presidio + GCP Vision</p>
+            </div>
+          </div>
+          <div className="glass-stat-card">
+            <div className="stat-icon-wrap"><Zap size={20} /></div>
+            <div className="stat-card-content">
+              <h4>Processing</h4>
+              <p>Async via Celery</p>
+            </div>
+          </div>
+        </div>
+
         <div className="tab-nav">
           <button className={`tab-btn${tab === 'file' ? ' active' : ''}`} onClick={() => setTab('file')}><FileText size={18} /> Document (Cloud OCR)</button>
           <button className={`tab-btn${tab === 'text' ? ' active' : ''}`} onClick={() => setTab('text')}><Type size={18} /> Text</button>
@@ -299,56 +419,136 @@ export default function App() {
 
         {tab === 'file' && (
           <div className="upload-section">
-            <div className={`drop-zone${dragOver ? ' drag-over' : ''}${file ? ' has-file' : ''}`}
-                 onDrop={handleDrop} onDragOver={e => {e.preventDefault(); setDragOver(true);}} onDragLeave={() => setDragOver(false)}>
-              <input ref={fileInputRef} type="file" onChange={(e) => handleFileSelect(e.target.files[0])} className="file-input-hidden" />
-              {file ? (
-                <>
-                  <CheckCircle size={48} className="drop-icon" style={{color: 'var(--success)'}} />
-                  <p className="drop-title">File ready</p>
-                  <span className="file-info">{file.name} · {(file.size / 1024).toFixed(0)} KB</span>
-                </>
-              ) : (
-                <>
-                  <UploadCloud size={56} className="drop-icon" />
-                  <p className="drop-title">Drop document or image</p>
-                  <p className="drop-sub">Processed securely via Google Cloud Vision & AWS S3</p>
-                </>
-              )}
-            </div>
+            {!processedUrl && !isLoading && (
+              <div 
+                className={`drop-zone ${dragOver ? 'drag-over' : ''} ${file ? 'has-file' : ''}`}
+                onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
+                onDragLeave={() => setDragOver(false)}
+                onDrop={(e) => {
+                  e.preventDefault();
+                  setDragOver(false);
+                  if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+                    handleFileSelect(e.dataTransfer.files[0]);
+                  }
+                }}
+                onClick={() => fileInputRef.current?.click()}
+              >
+                {/* Component 1: Animated Scanning Line */}
+                <div className="scan-line"></div>
+                
+                {file ? (
+                  <>
+                    <CheckCircle className="drop-icon" size={48} style={{ color: 'var(--success)' }} />
+                    <h3 className="drop-title">Ready to process</h3>
+                    <p className="drop-sub">Click process to detect and mask PII.</p>
+                    <div className="file-info"><FileText size={16}/> {file.name}</div>
+                  </>
+                ) : (
+                  <>
+                    <UploadCloud className="drop-icon" size={48} />
+                    <h3 className="drop-title">Drag & drop document</h3>
+                    <p className="drop-sub">Support for PDF, DOCX, JPG, PNG, WEBP</p>
+                    <span className="drop-browse">or browse files</span>
+                  </>
+                )}
+                <input 
+                  type="file" 
+                  ref={fileInputRef} 
+                  className="file-input-hidden"
+                  onChange={(e) => handleFileSelect(e.target.files[0])}
+                  accept=".pdf,.docx,.jpg,.jpeg,.png,.webp"
+                />
+              </div>
+            )}
 
             {error && <div className="alert alert-error"><AlertTriangle size={18} /> {error}</div>}
 
-            <div className="btn-row">
-              <button className="btn-primary" onClick={handleProcess} disabled={!file || isLoading}>
-                {isLoading ? 'Processing in Cloud…' : <><Lock size={18} /> Mask Document</>}
-              </button>
-              {(file || processedUrl) && <button className="btn-secondary" onClick={handleReset}><RefreshCw size={16} /> Reset</button>}
-              {processedUrl && <a href={processedUrl} target="_blank" rel="noreferrer" className="btn-download"><Download size={16} /> Download from S3</a>}
-            </div>
-            {report && !isLoading && <DetectionReport report={report} />}
+            {isLoading && (
+              <div className="loading-state">
+                {/* Component 3: Shield Helix Loader */}
+                <div className="shield-loader-container">
+                  <div className="shield-ring"></div>
+                  <div className="shield-ring"></div>
+                  <ShieldAlert size={36} className="shield-icon" />
+                </div>
+                <p>AI Masking in Progress...</p>
+              </div>
+            )}
+
+            {!isLoading && file && !processedUrl && (
+              <div className="btn-row">
+                <button className="btn-secondary" onClick={handleReset}><RefreshCw size={16}/> Clear</button>
+                <button className="btn-primary" onClick={handleProcess}><Lock size={16}/> Mask Document</button>
+              </div>
+            )}
+
+            {processedUrl && !isLoading && (
+              <div className="result-section">
+                {file.type.startsWith('image/') ? (
+                  <div className="image-card">
+                    <div className="image-card-header">
+                      <span className="image-card-title"><span className="image-card-title-dot dot-processed"/> Before & After</span>
+                      <a href={processedUrl} download className="btn-download"><Download size={16} /> Download Masked</a>
+                    </div>
+                    <div className="image-card-body" style={{ padding: 0 }}>
+                      <ImageReveal original={originalPreview} masked={processedUrl} />
+                    </div>
+                  </div>
+                ) : (
+                  <div className="image-card">
+                    <div className="image-card-header">
+                      <span className="image-card-title"><span className="image-card-title-dot dot-processed"/> Secure Document Generated</span>
+                      <a href={processedUrl} download className="btn-download"><Download size={16} /> Download PDF/DOCX</a>
+                    </div>
+                  </div>
+                )}
+                
+                <DetectionReport report={report} />
+                
+                <div className="btn-row" style={{ marginTop: '32px' }}>
+                  <button className="btn-secondary" onClick={handleReset}><RefreshCw size={16}/> Process Another</button>
+                </div>
+              </div>
+            )}
           </div>
         )}
 
-        {/* Text and Admin tabs remain same layout, just omitting implementation here for brevity to focus on changes */}
         {tab === 'text' && (
           <div className="text-section">
             <div className="text-input-wrap">
-              <textarea placeholder="Paste text here..." value={inputText} onChange={e => setInputText(e.target.value)} rows={8} />
+              <div className="text-input-header">
+                <label>Input Text</label>
+                <span className={`risk-badge ${riskClass}`}>{riskLabel} ({charCount} chars)</span>
+              </div>
+              <textarea 
+                value={inputText}
+                onChange={(e) => setInputText(e.target.value)}
+                placeholder="Paste raw text here... (e.g. My SSN is 123-45-678 and email is test@corp.com)"
+                disabled={textLoading}
+              />
             </div>
-            {textError && <div className="alert alert-error">{textError}</div>}
+            
+            {textError && <div className="alert alert-error"><AlertTriangle size={18} /> {textError}</div>}
+            
             <div className="btn-row">
-              <button className="btn-primary" onClick={handleMaskText} disabled={!inputText.trim() || textLoading}>
-                {textLoading ? 'Scanning…' : <><ScanLine size={18} /> Mask Text</>}
+              <button 
+                className="btn-primary" 
+                onClick={handleMaskText} 
+                disabled={textLoading || !inputText.trim()}
+              >
+                {textLoading ? 'Analyzing...' : <><ScanLine size={16}/> Mask Text</>}
               </button>
-              {textResult && <button className="btn-secondary" onClick={() => { setInputText(''); setTextResult(null); }}>Clear</button>}
             </div>
-            {textResult && (
+
+            {textResult && !textLoading && (
               <div className="text-result-card">
-                <div className="text-result-header">Masked output</div>
-                <div className="text-result-body">
-                  {textResult.pii_found ? <MaskedText text={textResult.masked} /> : <span style={{ color: 'var(--text-muted)' }}>No PII detected.</span>}
+                <div className="text-result-header">
+                  <span>Sanitized Output</span>
                 </div>
+                <div className="text-result-body">
+                  <MaskedText text={textResult.masked_text} />
+                </div>
+                <DetectionReport report={textResult.report} />
               </div>
             )}
           </div>
@@ -356,35 +556,37 @@ export default function App() {
 
         {tab === 'admin' && role === 'admin' && (
           <div className="admin-section">
-            <div className="admin-grid">
+            <div className="admin-grid" style={{ display: 'grid', gridTemplateColumns: '1fr 2fr', gap: '24px' }}>
               <div className="admin-card">
                 <h3><ShieldCheck size={20}/> DLP Policies</h3>
+                <p style={{fontSize: 13, color: 'var(--text-muted)', marginBottom: 16}}>Toggle which PII entities the engine should actively mask.</p>
                 <div className="policy-list">
                   {policies.map(p => (
                     <div className="policy-item" key={p.pii_type}>
-                      <span>{p.pii_type}</span>
-                      <button className="toggle-btn" onClick={() => togglePolicy(p.pii_type, p.is_active)} style={{color: p.is_active ? 'var(--accent-cyan)' : 'var(--text-muted)'}}>
-                        {p.is_active ? <ToggleRight size={28}/> : <ToggleLeft size={28}/>}
+                      <span style={{fontWeight: 500, fontSize: 14}}>{formatType(p.pii_type)}</span>
+                      <button className="toggle-btn" onClick={() => togglePolicy(p.pii_type, p.is_active)} style={{ color: p.is_active ? 'var(--success)' : 'var(--text-muted)' }}>
+                        {p.is_active ? <ToggleRight size={24}/> : <ToggleLeft size={24}/>}
                       </button>
                     </div>
                   ))}
                 </div>
               </div>
-
-              <div className="admin-card audit-card">
+              <div className="admin-card">
                 <h3><Activity size={20}/> Audit Logs</h3>
+                <p style={{fontSize: 13, color: 'var(--text-muted)', marginBottom: 16}}>Immutable record of all PII processing activity.</p>
                 <div className="audit-table-wrap">
                   <table className="audit-table">
-                    <thead><tr><th>Time</th><th>Auth0 User ID</th><th>Action</th><th>Entities Detected</th></tr></thead>
+                    <thead><tr><th>Time</th><th>User (Auth0)</th><th>Action</th><th>IP Address</th></tr></thead>
                     <tbody>
                       {logs.map(l => (
                         <tr key={l.id}>
-                          <td style={{whiteSpace:'nowrap'}}>{new Date(l.timestamp).toLocaleString()}</td>
-                          <td style={{maxWidth: '120px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap'}}>{l.user_id}</td>
-                          <td><span className={`tag-${l.action === 'LOGIN' ? 'user' : 'primary'}`}>{l.action}</span></td>
-                          <td>{(l.details?.detected || []).join(', ')}</td>
+                          <td>{new Date(l.timestamp).toLocaleString()}</td>
+                          <td><span className="tag-user"><User size={10} style={{display:'inline'}}/> {l.user_id}</span></td>
+                          <td><span className="tag-primary">{l.action}</span></td>
+                          <td style={{fontFamily: 'monospace'}}>{l.ip_address}</td>
                         </tr>
                       ))}
+                      {logs.length === 0 && <tr><td colSpan="4" style={{textAlign:'center', color:'var(--text-muted)'}}>No logs found</td></tr>}
                     </tbody>
                   </table>
                 </div>
