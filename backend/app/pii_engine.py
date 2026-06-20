@@ -31,32 +31,48 @@ def _get_anonymizer():
         _anonymizer = AnonymizerEngine()
     return _anonymizer
 
-def detect_and_mask_text(text: str, active_entities: list[str]) -> dict:
+def _apply_custom_regex(text: str, custom_patterns: list):
+    import re
+    from presidio_analyzer import RecognizerResult
+    results = []
+    if not custom_patterns: return results
+    for pattern_dict in custom_patterns:
+        try:
+            for match in re.finditer(pattern_dict['pattern'], text):
+                results.append(RecognizerResult(entity_type=pattern_dict['name'], start=match.start(), end=match.end(), score=1.0))
+        except re.error:
+            pass # Ignore invalid regex
+    return results
+
+def detect_and_mask_text(text: str, active_entities: list[str], masking_style: str = "LABEL", custom_patterns: list = None) -> dict:
     """
-    Use Presidio to analyze and mask text based on active policies.
-    active_entities is a list of entity strings allowed to be masked.
-    e.g., ["PERSON", "EMAIL_ADDRESS", "AADHAAR"]
+    Use Presidio to analyze and mask text based on active policies and custom regex.
     """
     if not text.strip():
         return {"found": False, "types": [], "redacted": text}
 
-    # If no entities are active, don't mask anything
-    if not active_entities:
-        return {"found": False, "types": [], "redacted": text}
-
     # Analyze
-    results = _get_analyzer().analyze(text=text, entities=active_entities, language='en')
+    results = _get_analyzer().analyze(text=text, entities=active_entities, language='en') if active_entities else []
+    
+    # Add custom regex results
+    results.extend(_apply_custom_regex(text, custom_patterns))
     
     if not results:
         return {"found": False, "types": [], "redacted": text}
 
     # Anonymize
-    # By default, Presidio replaces with <ENTITY_TYPE>
-    # We want [ENTITY_TYPE_MASKED]
     from presidio_anonymizer.entities import OperatorConfig
     operators = {}
-    for ent in active_entities:
-        operators[ent] = OperatorConfig("replace", {"new_value": f"[{ent}_MASKED]"})
+    
+    all_entity_types = set([r.entity_type for r in results])
+    
+    for ent in all_entity_types:
+        if masking_style == "BLACKOUT":
+            operators[ent] = OperatorConfig("replace", {"new_value": "████████"})
+        elif masking_style == "ASTERISK":
+            operators[ent] = OperatorConfig("replace", {"new_value": "***"})
+        else: # LABEL
+            operators[ent] = OperatorConfig("replace", {"new_value": f"[{ent}_MASKED]"})
         
     anonymized_result = _get_anonymizer().anonymize(
         text=text,
@@ -64,16 +80,16 @@ def detect_and_mask_text(text: str, active_entities: list[str]) -> dict:
         operators=operators
     )
 
-    found_types = list(set([r.entity_type for r in results]))
-
     return {
-        "found": len(found_types) > 0,
-        "types": found_types,
+        "found": True,
+        "types": list(all_entity_types),
         "redacted": anonymized_result.text
     }
 
-def detect_raw(text: str, active_entities: list[str]):
-    if not text.strip() or not active_entities:
+def detect_raw(text: str, active_entities: list[str], custom_patterns: list = None):
+    if not text.strip():
         return []
-    return _get_analyzer().analyze(text=text, entities=active_entities, language='en')
+    results = _get_analyzer().analyze(text=text, entities=active_entities, language='en') if active_entities else []
+    results.extend(_apply_custom_regex(text, custom_patterns))
+    return results
 

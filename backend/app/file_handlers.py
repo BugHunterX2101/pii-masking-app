@@ -2,14 +2,14 @@ import fitz  # PyMuPDF
 from docx import Document
 import io
 
-def process_docx(file_bytes: bytes, active_entities: list[str], detect_fn) -> tuple[bytes, list]:
+def process_docx(file_bytes: bytes, active_entities: list[str], detect_fn, masking_style: str = "LABEL", custom_patterns: list = None) -> tuple[bytes, list]:
     doc = Document(io.BytesIO(file_bytes))
     report = []
     
     for para in doc.paragraphs:
         if not para.text.strip():
             continue
-        res = detect_fn(para.text, active_entities)
+        res = detect_fn(para.text, active_entities, masking_style, custom_patterns)
         if res["found"]:
             para.text = res["redacted"]
             report.append({
@@ -21,7 +21,7 @@ def process_docx(file_bytes: bytes, active_entities: list[str], detect_fn) -> tu
         for row in table.rows:
             for cell in row.cells:
                 if cell.text.strip():
-                    res = detect_fn(cell.text, active_entities)
+                    res = detect_fn(cell.text, active_entities, masking_style, custom_patterns)
                     if res["found"]:
                         cell.text = res["redacted"]
                         report.append({
@@ -34,7 +34,7 @@ def process_docx(file_bytes: bytes, active_entities: list[str], detect_fn) -> tu
     return out_io.getvalue(), report
 
 
-def process_pdf(file_bytes: bytes, active_entities: list[str], detect_raw_fn) -> tuple[bytes, list]:
+def process_pdf(file_bytes: bytes, active_entities: list[str], detect_raw_fn, custom_patterns: list = None) -> tuple[bytes, list]:
     """
     Process native text PDFs using PyMuPDF redactions.
     detect_raw_fn should be a function that returns Presidio analyzer results (so we have start/end chars).
@@ -47,7 +47,7 @@ def process_pdf(file_bytes: bytes, active_entities: list[str], detect_raw_fn) ->
         if not text.strip():
             continue
             
-        results = detect_raw_fn(text, active_entities)
+        results = detect_raw_fn(text, active_entities, custom_patterns)
         if not results:
             continue
             
@@ -73,7 +73,7 @@ def process_pdf(file_bytes: bytes, active_entities: list[str], detect_raw_fn) ->
     doc.save(out_io)
     return out_io.getvalue(), report
 
-def mask_pii_in_image_gcp(image_bytes: bytes, active_entities: list[str], detect_raw_fn):
+def mask_pii_in_image_gcp(image_bytes: bytes, active_entities: list[str], detect_raw_fn, custom_patterns: list = None):
     import cv2
     import numpy as np
     from google.cloud import vision
@@ -101,7 +101,7 @@ def mask_pii_in_image_gcp(image_bytes: bytes, active_entities: list[str], detect
     full_text = texts[0].description
     
     # 2. Run Presidio on the full context block
-    detection_results = detect_raw_fn(full_text, active_entities)
+    detection_results = detect_raw_fn(full_text, active_entities, custom_patterns)
     
     if not detection_results:
         return image_bytes, []

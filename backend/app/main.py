@@ -82,8 +82,17 @@ def get_active_entities(db: Session):
         for p in default:
             db.add(models.DLPPolicy(pii_type=p, is_active=True))
         db.commit()
-        return default
-    return [p.pii_type for p in policies]
+        active_entities = default
+    else:
+        active_entities = [p.pii_type for p in policies]
+        
+    settings = db.query(models.SystemSettings).first()
+    masking_style = settings.masking_style if settings else "LABEL"
+    
+    custom = db.query(models.CustomRegexPolicy).filter(models.CustomRegexPolicy.is_active == True).all()
+    custom_patterns = [{"name": c.name, "pattern": c.pattern} for c in custom]
+    
+    return active_entities, masking_style, custom_patterns
 
 def log_audit(db: Session, user_id: int, action: str, ip: str, details: dict):
     log = models.AuditLog(
@@ -221,6 +230,94 @@ def update_policy(update: PolicyUpdate, db: Session = Depends(get_db), current_u
     db.commit()
     return {"msg": "Policy updated"}
 
+@app.get("/api/admin/settings")
+def get_settings(db: Session = Depends(get_db), current_user: models.User = Depends(require_admin)):
+    settings = db.query(models.SystemSettings).first()
+    if not settings:
+        settings = models.SystemSettings(masking_style="LABEL")
+        db.add(settings)
+        db.commit()
+    return {"masking_style": settings.masking_style}
+
+class SettingsUpdate(BaseModel):
+    masking_style: str
+
+@app.put("/api/admin/settings")
+def update_settings(update: SettingsUpdate, db: Session = Depends(get_db), current_user: models.User = Depends(require_admin)):
+    settings = db.query(models.SystemSettings).first()
+    if not settings:
+        settings = models.SystemSettings(masking_style=update.masking_style)
+        db.add(settings)
+    else:
+        settings.masking_style = update.masking_style
+    db.commit()
+    return {"msg": "Settings updated"}
+
+@app.get("/api/admin/custom-regex")
+def get_custom_regex(db: Session = Depends(get_db), current_user: models.User = Depends(require_admin)):
+    patterns = db.query(models.CustomRegexPolicy).all()
+    return [{"id": p.id, "name": p.name, "pattern": p.pattern, "is_active": p.is_active} for p in patterns]
+
+class CustomRegexCreate(BaseModel):
+    name: str
+    pattern: str
+    is_active: bool = True
+
+@app.post("/api/admin/custom-regex")
+def create_custom_regex(regex: CustomRegexCreate, db: Session = Depends(get_db), current_user: models.User = Depends(require_admin)):
+    import re
+    try:
+        re.compile(regex.pattern)
+    except re.error:
+        raise HTTPException(status_code=400, detail="Invalid Regex pattern")
+    
+    new_regex = models.CustomRegexPolicy(name=regex.name.upper().replace(' ', '_'), pattern=regex.pattern, is_active=regex.is_active)
+    db.add(new_regex)
+    db.commit()
+    return {"msg": "Regex added"}
+
+@app.delete("/api/admin/custom-regex/{regex_id}")
+def delete_custom_regex(regex_id: int, db: Session = Depends(get_db), current_user: models.User = Depends(require_admin)):
+    regex = db.query(models.CustomRegexPolicy).filter(models.CustomRegexPolicy.id == regex_id).first()
+    if regex:
+        db.delete(regex)
+        db.commit()
+    return {"msg": "Regex deleted"}
+
+@app.get("/api/admin/logs/export")
+def export_logs(db: Session = Depends(get_db), current_user: models.User = Depends(require_admin)):
+    import csv
+    import io
+    from fastapi.responses import StreamingResponse
+    
+    logs = db.query(models.AuditLog).order_by(models.AuditLog.timestamp.desc()).all()
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow(["ID", "Timestamp", "User ID", "Action", "IP Address", "Details"])
+    
+    for l in logs:
+        writer.writerow([l.id, l.timestamp.isoformat(), l.user.username if l.user else l.user_id, l.action, l.ip_address, json.dumps(l.details) if l.details else ""])
+    
+    output.seek(0)
+    return StreamingResponse(
+        iter([output.getvalue()]),
+        media_type="text/csv",
+        headers={"Content-Disposition": "attachment; filename=audit_logs.csv"}
+    )
+
+@app.get("/api/admin/analytics")
+def get_analytics(db: Session = Depends(get_db), current_user: models.User = Depends(require_admin)):
+    logs = db.query(models.AuditLog).all()
+    entity_counts = {}
+    for l in logs:
+        if l.details and "detected" in l.details:
+            for ent in l.details["detected"]:
+                entity_counts[ent] = entity_counts.get(ent, 0) + 1
+                
+    # Sort descending
+    sorted_counts = [{"name": k, "count": v} for k, v in sorted(entity_counts.items(), key=lambda item: item[1], reverse=True)]
+    return sorted_counts
+
 # -------------------------------------------------------------------
 # App API Routes (Protected)
 # -------------------------------------------------------------------
@@ -239,15 +336,22 @@ async def upload_file(request: Request, file: UploadFile = File(...), current_us
             media_type = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
         elif ext in ['jpg', 'jpeg', 'png', 'webp']:
             media_type = "image/jpeg"
+        elif ext in ['zip']:
+            media_type = "application/zip"
         else:
             raise HTTPException(status_code=400, detail="Unsupported file format.")
 
         # Upload raw file to S3 first
         s3_key = upload_raw_to_s3(file_bytes, file.filename, media_type)
-
-        # Dispatch Celery task
-        from backend.app.worker import process_document_task
-        task = process_document_task.delay(s3_key, file.filename, media_type, active_entities)
+        active_entities, masking_style, custom_patterns = get_active_entities(db)
+    
+        # 2. Dispatch task to Celery
+        if ext == 'zip':
+            from backend.app.worker import process_batch_task
+            task = process_batch_task.delay(s3_key, active_entities, masking_style, custom_patterns)
+        else:
+            from backend.app.worker import process_document_task
+            task = process_document_task.delay(s3_key, file.filename, media_type, active_entities, masking_style, custom_patterns)
 
         # Log audit for task initiation
         log_audit(db, current_user.id, "FILE_MASK_TASK_STARTED", request.client.host if request.client else "N/A", {
@@ -288,8 +392,8 @@ class TextMaskRequest(BaseModel):
 
 @app.post("/api/mask-text")
 async def mask_text(request: Request, req: TextMaskRequest, current_user: models.User = Depends(get_current_user), db: Session = Depends(get_db)):
-    active_entities = get_active_entities(db)
-    result = pii_engine.detect_and_mask_text(req.text, active_entities)
+    active_entities, masking_style, custom_patterns = get_active_entities(db)
+    result = pii_engine.detect_and_mask_text(req.text, active_entities, masking_style, custom_patterns)
     
     if result["found"]:
         log_audit(db, current_user.id, "TEXT_MASK", request.client.host if request.client else "N/A", {

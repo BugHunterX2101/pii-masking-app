@@ -30,3 +30,17 @@ class AuditLog(Base):
     details = Column(JSON, nullable=True) # JSON containing what was detected, etc.
 
     user = relationship("User")
+
+class CustomRegexPolicy(Base):
+    __tablename__ = "custom_regex_policies"
+
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String, unique=True, index=True, nullable=False)
+    pattern = Column(String, nullable=False)
+    is_active = Column(Boolean, default=True)
+
+class SystemSettings(Base):
+    __tablename__ = "system_settings"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    masking_style = Column(String, default="LABEL", nullable=False) # LABEL, BLACKOUT, ASTERISK

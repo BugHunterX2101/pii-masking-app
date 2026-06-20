@@ -127,6 +127,11 @@ export default function App() {
   const [logs, setLogs] = useState([]);
   const [policies, setPolicies] = useState([]);
   const [users, setUsers] = useState([]);
+  const [customRegex, setCustomRegex] = useState([]);
+  const [settings, setSettings] = useState({ masking_style: 'LABEL' });
+  const [analytics, setAnalytics] = useState([]);
+  const [newRegexName, setNewRegexName] = useState('');
+  const [newRegexPattern, setNewRegexPattern] = useState('');
   // Session Stats (Component 7)
   const [stats, setStats] = useState({ docs: 0, pii: 0 });
 
@@ -175,8 +180,51 @@ export default function App() {
 
       const uRes = await fetch(`${apiUrl}/api/admin/users`, { headers: { 'Authorization': `Bearer ${token}` }});
       if(uRes.ok) setUsers(await uRes.json());
+      
+      const crRes = await fetch(`${apiUrl}/api/admin/custom-regex`, { headers: { 'Authorization': `Bearer ${token}` }});
+      if(crRes.ok) setCustomRegex(await crRes.json());
+      
+      const sRes = await fetch(`${apiUrl}/api/admin/settings`, { headers: { 'Authorization': `Bearer ${token}` }});
+      if(sRes.ok) setSettings(await sRes.json());
+      
+      const aRes = await fetch(`${apiUrl}/api/admin/analytics`, { headers: { 'Authorization': `Bearer ${token}` }});
+      if(aRes.ok) setAnalytics(await aRes.json());
     } catch(err) {}
   }, [apiUrl, token, role]);
+
+  const handleAddRegex = async () => {
+    try {
+      await fetch(`${apiUrl}/api/admin/custom-regex`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+        body: JSON.stringify({ name: newRegexName, pattern: newRegexPattern })
+      });
+      setNewRegexName(''); setNewRegexPattern('');
+      loadAdminData();
+    } catch(e) {}
+  };
+  
+  const handleDeleteRegex = async (id) => {
+    try {
+      await fetch(`${apiUrl}/api/admin/custom-regex/${id}`, {
+        method: 'DELETE',
+        headers: { 'Authorization': `Bearer ${token}` }
+      });
+      loadAdminData();
+    } catch(e) {}
+  };
+
+  const handleSettingsChange = async (e) => {
+    const val = e.target.value;
+    setSettings({ masking_style: val });
+    try {
+      await fetch(`${apiUrl}/api/admin/settings`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+        body: JSON.stringify({ masking_style: val })
+      });
+    } catch(e) {}
+  };
 
   useEffect(() => {
     if (tab === 'admin') loadAdminData();
@@ -465,8 +513,8 @@ export default function App() {
                 ) : (
                   <>
                     <UploadCloud className="drop-icon" size={48} />
-                    <h3 className="drop-title">Drag & drop document</h3>
-                    <p className="drop-sub">Support for PDF, DOCX, JPG, PNG, WEBP</p>
+                    <h3 className="drop-title">Drag & drop document or ZIP</h3>
+                    <p className="drop-sub">Support for PDF, DOCX, JPG, PNG, WEBP, ZIP (Batch)</p>
                     <span className="drop-browse">or browse files</span>
                   </>
                 )}
@@ -475,7 +523,7 @@ export default function App() {
                   ref={fileInputRef} 
                   className="file-input-hidden"
                   onChange={(e) => handleFileSelect(e.target.files[0])}
-                  accept=".pdf,.docx,.jpg,.jpeg,.png,.webp"
+                  accept=".pdf,.docx,.jpg,.jpeg,.png,.webp,.zip"
                 />
               </div>
             )}
@@ -591,7 +639,7 @@ export default function App() {
                 </div>
               </div>
               <div className="admin-card">
-                <h3><Activity size={20}/> Audit Logs</h3>
+                <h3><Activity size={20}/> Audit Logs <a href={`${apiUrl}/api/admin/logs/export`} style={{float:'right', fontSize:12, padding:'4px 8px', borderRadius:4, background:'var(--primary)', color:'white', textDecoration:'none'}} download>Export CSV</a></h3>
                 <p style={{fontSize: 13, color: 'var(--text-muted)', marginBottom: 16}}>Immutable record of all PII processing activity.</p>
                 <div className="audit-table-wrap">
                   <table className="audit-table">
@@ -640,6 +688,53 @@ export default function App() {
                     {users.length === 0 && <tr><td colSpan="4" style={{textAlign:'center', color:'var(--text-muted)'}}>No users found</td></tr>}
                   </tbody>
                 </table>
+              </div>
+            </div>
+            
+            <div className="admin-grid" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '24px', marginTop: '24px' }}>
+              <div className="admin-card">
+                <h3><Activity size={20}/> Advanced Analytics</h3>
+                <p style={{fontSize: 13, color: 'var(--text-muted)', marginBottom: 16}}>Top PII entities detected across all time.</p>
+                <div style={{display:'flex', flexDirection:'column', gap:8}}>
+                  {analytics.map(a => (
+                    <div key={a.name} style={{display:'flex', justifyContent:'space-between', padding:8, background:'var(--card-bg)', borderRadius:4, border:'1px solid var(--border)'}}>
+                      <span style={{fontWeight:500}}>{a.name}</span>
+                      <span style={{color:'var(--primary)', fontWeight:700}}>{a.count} detections</span>
+                    </div>
+                  ))}
+                  {analytics.length === 0 && <span style={{color:'var(--text-muted)'}}>No analytics data yet.</span>}
+                </div>
+              </div>
+
+              <div className="admin-card">
+                <h3><Settings size={20}/> Global Masking Settings</h3>
+                <p style={{fontSize: 13, color: 'var(--text-muted)', marginBottom: 16}}>Configure how PII is redacted in output files.</p>
+                <select className="role-select" value={settings.masking_style} onChange={handleSettingsChange} style={{width:'100%', padding:12}}>
+                  <option value="LABEL">[ENTITY_MASKED] (Label)</option>
+                  <option value="BLACKOUT">████████ (Blackout)</option>
+                  <option value="ASTERISK">*** (Asterisk)</option>
+                </select>
+              </div>
+            </div>
+
+            <div className="admin-card" style={{ marginTop: '24px' }}>
+              <h3><Type size={20}/> Custom Regex Policy Builder</h3>
+              <p style={{fontSize: 13, color: 'var(--text-muted)', marginBottom: 16}}>Define proprietary text patterns (like custom Employee IDs) to mask.</p>
+              <div style={{display:'flex', gap:8, marginBottom:16}}>
+                <input type="text" placeholder="Entity Name (e.g. EMP_ID)" value={newRegexName} onChange={e=>setNewRegexName(e.target.value)} style={{flex:1, padding:8, borderRadius:4, border:'1px solid var(--border)', background:'var(--card-bg)', color:'white'}} />
+                <input type="text" placeholder="Regex Pattern (e.g. EMP-\d{5})" value={newRegexPattern} onChange={e=>setNewRegexPattern(e.target.value)} style={{flex:2, padding:8, borderRadius:4, border:'1px solid var(--border)', background:'var(--card-bg)', color:'white', fontFamily:'monospace'}} />
+                <button className="btn-primary" onClick={handleAddRegex} disabled={!newRegexName || !newRegexPattern}>Add Rule</button>
+              </div>
+              <div className="policy-list">
+                {customRegex.map(p => (
+                  <div className="policy-item" key={p.id}>
+                    <span style={{fontWeight: 500, fontSize: 14}}>{p.name} <span style={{fontFamily:'monospace', color:'var(--text-muted)', fontSize:12, marginLeft:8}}>{p.pattern}</span></span>
+                    <button className="toggle-btn" onClick={() => handleDeleteRegex(p.id)} style={{ color: 'var(--error)' }}>
+                      Delete
+                    </button>
+                  </div>
+                ))}
+                {customRegex.length === 0 && <span style={{color:'var(--text-muted)', fontSize:13}}>No custom rules defined.</span>}
               </div>
             </div>
           </div>
