@@ -3,7 +3,6 @@ import boto3
 import uuid
 from celery import Celery
 from . import pii_engine, file_handlers
-from .main import mask_pii_in_image_gcp, upload_to_s3_and_get_url
 
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
 AWS_REGION = os.getenv("AWS_REGION", "us-east-2")
@@ -32,7 +31,7 @@ def process_document_task(self, s3_key: str, filename: str, content_type: str, a
             out_bytes, report = file_handlers.process_docx(file_bytes, active_entities, pii_engine.detect_and_mask_text)
             media_type = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
         elif ext in ['jpg', 'jpeg', 'png', 'webp']:
-            out_bytes, report = mask_pii_in_image_gcp(file_bytes, active_entities)
+            out_bytes, report = file_handlers.mask_pii_in_image_gcp(file_bytes, active_entities, pii_engine.detect_raw)
             media_type = "image/jpeg"
         else:
             raise ValueError("Unsupported file format.")

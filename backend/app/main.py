@@ -48,9 +48,6 @@ if gcp_creds:
     with open("/tmp/gcp.json", "w") as f:
         f.write(gcp_creds)
     os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = "/tmp/gcp.json"
-else:
-    # Local fallback
-    os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = os.path.join(os.path.dirname(__file__), "..", "..", "pii-mask-499914-9ed290e326eb.json")
 
 
 # -------------------------------------------------------------------
@@ -97,57 +94,6 @@ def log_audit(db: Session, user_id: int, action: str, ip: str, details: dict):
     )
     db.add(log)
     db.commit()
-
-# -------------------------------------------------------------------
-# Google Cloud Vision Image OCR
-# -------------------------------------------------------------------
-def mask_pii_in_image_gcp(image_bytes: bytes, active_entities: list[str]):
-    import cv2
-    import numpy as np
-    from google.cloud import vision
-    
-    # 1. OCR with Google Cloud Vision
-    client = vision.ImageAnnotatorClient()
-    image = vision.Image(content=image_bytes)
-    response = client.text_detection(image=image)
-    texts = response.text_annotations
-    
-    if response.error.message:
-        raise Exception(f"GCP Vision API Error: {response.error.message}")
-        
-    if not texts:
-        # No text found
-        return image_bytes, []
-
-    # Decode image using OpenCV for drawing
-    nparr = np.frombuffer(image_bytes, np.uint8)
-    img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-    masked = img.copy()
-    report = []
-    
-    # texts[0] is the entire text. texts[1:] are individual words/boxes
-    # We will run Presidio on the full text, but tracking individual word boxes is hard.
-    # Instead, we run Presidio on each block or paragraph if available, or just use the individual word annotations.
-    # For simplicity, we'll check each word/phrase returned by Vision.
-    for text_annotation in texts[1:]:
-        word = text_annotation.description
-        detection = pii_engine.detect_and_mask_text(word, active_entities)
-        
-        if detection["found"]:
-            # Draw bounding box
-            vertices = text_annotation.bounding_poly.vertices
-            top_left = (vertices[0].x, vertices[0].y)
-            bottom_right = (vertices[2].x, vertices[2].y)
-            
-            cv2.rectangle(masked, top_left, bottom_right, (0, 0, 0), -1)
-            report.append({
-                "text": word,
-                "pii_types": detection["types"]
-            })
-            
-    success, buffer = cv2.imencode('.jpg', masked, [cv2.IMWRITE_JPEG_QUALITY, 95])
-    return buffer.tobytes(), report
-
 # -------------------------------------------------------------------
 # S3 Upload Helper
 # -------------------------------------------------------------------
