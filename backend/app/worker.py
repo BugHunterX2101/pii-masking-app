@@ -60,3 +60,10 @@ def process_document_task(self, s3_key: str, filename: str, content_type: str, a
     except Exception as e:
         # Cleanly fail task
         raise e
+    finally:
+        # 4. Cleanup: Delete raw unmasked file from S3 to prevent data leaks
+        try:
+            s3_client.delete_object(Bucket=S3_BUCKET, Key=s3_key)
+            # We don't log success to avoid spam, but this guarantees deletion
+        except Exception:
+            pass # Best effort cleanup on failure
