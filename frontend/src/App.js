@@ -135,6 +135,7 @@ export default function App() {
   const [originalPreview, setOriginalPreview] = useState(null);
   const [processedUrl, setProcessedUrl] = useState(null);
   const [isLoading, setIsLoading] = useState(false);
+  const [taskMessage, setTaskMessage] = useState('');
   const [error, setError] = useState('');
   const [report, setReport] = useState(null);
   const [dragOver, setDragOver] = useState(false);
@@ -192,24 +193,31 @@ export default function App() {
   const loadAdminData = useCallback(async () => {
     if (!token || role !== 'admin') return;
     try {
-      const pRes = await fetch(`${apiUrl}/api/admin/policies`, { headers: { 'Authorization': `Bearer ${token}` }});
-      if(pRes.ok) setPolicies(await pRes.json());
-      
-      const lRes = await fetch(`${apiUrl}/api/admin/logs`, { headers: { 'Authorization': `Bearer ${token}` }});
-      if(lRes.ok) setLogs(await lRes.json());
+      const headers = { 'Authorization': `Bearer ${token}` };
+      const urls = [
+        `${apiUrl}/api/admin/policies`,
+        `${apiUrl}/api/admin/logs`,
+        `${apiUrl}/api/admin/users`,
+        `${apiUrl}/api/admin/custom-regex`,
+        `${apiUrl}/api/admin/settings`,
+        `${apiUrl}/api/admin/analytics`
+      ];
 
-      const uRes = await fetch(`${apiUrl}/api/admin/users`, { headers: { 'Authorization': `Bearer ${token}` }});
-      if(uRes.ok) setUsers(await uRes.json());
-      
-      const crRes = await fetch(`${apiUrl}/api/admin/custom-regex`, { headers: { 'Authorization': `Bearer ${token}` }});
-      if(crRes.ok) setCustomRegex(await crRes.json());
-      
-      const sRes = await fetch(`${apiUrl}/api/admin/settings`, { headers: { 'Authorization': `Bearer ${token}` }});
-      if(sRes.ok) setSettings(await sRes.json());
-      
-      const aRes = await fetch(`${apiUrl}/api/admin/analytics`, { headers: { 'Authorization': `Bearer ${token}` }});
-      if(aRes.ok) setAnalytics(await aRes.json());
-    } catch(err) {}
+      const responses = await Promise.allSettled(urls.map(url => fetch(url, { headers })));
+      const jsonPromises = responses.map(res => 
+        (res.status === 'fulfilled' && res.value.ok) ? res.value.json() : Promise.resolve(null)
+      );
+      const data = await Promise.all(jsonPromises);
+
+      if (data[0]) setPolicies(data[0]);
+      if (data[1]) setLogs(data[1]);
+      if (data[2]) setUsers(data[2]);
+      if (data[3]) setCustomRegex(data[3]);
+      if (data[4]) setSettings(data[4]);
+      if (data[5]) setAnalytics(data[5]);
+    } catch(err) {
+      console.error("Failed to load admin data", err);
+    }
   }, [apiUrl, token, role]);
 
   const handleAddRegex = async () => {
@@ -328,17 +336,23 @@ export default function App() {
         setProcessedUrl(data.result.download_url);
         setReport(data.result.report);
         setIsLoading(false);
+        setTaskMessage('');
         triggerConfetti(); // Component 9: Confetti Burst
         setStats(s => ({ docs: s.docs + 1, pii: s.pii + (data.result.report?.length || 0) }));
       } else if (data.status === 'FAILURE') {
         setError(data.error || 'Task failed during processing.');
         setIsLoading(false);
+        setTaskMessage('');
       } else {
+        if (data.message) {
+          setTaskMessage(data.message);
+        }
         setTimeout(() => pollTaskStatus(taskId), 2000);
       }
     } catch (err) {
       setError('Error checking task status.');
       setIsLoading(false);
+      setTaskMessage('');
     }
   };
 
@@ -348,6 +362,7 @@ export default function App() {
     setProcessedUrl(null);
     setReport(null);
     setError('');
+    setTaskMessage('');
     if (fileInputRef.current) fileInputRef.current.value = '';
   };
 
@@ -559,6 +574,7 @@ export default function App() {
                   <ShieldAlert size={36} className="shield-icon" />
                 </div>
                 <p>AI Masking in Progress...</p>
+                {taskMessage && <p className="task-message-detail" style={{fontSize: '0.85rem', color: 'var(--text-light)', marginTop: '0.5rem'}}>{taskMessage}</p>}
               </div>
             )}
 

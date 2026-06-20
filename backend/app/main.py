@@ -326,7 +326,6 @@ def get_analytics(db: Session = Depends(get_db), current_user: models.User = Dep
 # -------------------------------------------------------------------
 @app.post("/api/upload")
 async def upload_file(request: Request, file: UploadFile = File(...), current_user: models.User = Depends(get_current_user), db: Session = Depends(get_db)):
-    active_entities = get_active_entities(db)
     file_bytes = await file.read()
     
     ext = file.filename.lower().split('.')[-1] if '.' in file.filename else ''
