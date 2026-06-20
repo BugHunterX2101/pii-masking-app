@@ -15,8 +15,8 @@ from pydantic import BaseModel
 import boto3
 from botocore.exceptions import NoCredentialsError
 
-from app import models, database, auth, pii_engine, file_handlers
-from app.database import engine, get_db
+from backend.app import models, database, auth, pii_engine, file_handlers
+from backend.app.database import engine, get_db
 
 models.Base.metadata.create_all(bind=engine)
 
