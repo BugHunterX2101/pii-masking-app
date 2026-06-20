@@ -34,8 +34,7 @@ WORKDIR $HOME/app
 COPY --chown=user:user requirements.txt .
 RUN pip install --no-cache-dir --user -r requirements.txt
 
-# Pre-download spaCy model weights
-RUN python -m spacy download en_core_web_lg
+# spaCy model is installed via requirements.txt (direct pip wheel URL)
 
 # Copy backend source
 COPY --chown=user:user backend/ ./backend/
