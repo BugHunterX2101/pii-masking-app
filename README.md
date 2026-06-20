@@ -475,6 +475,5 @@ pii-masking-app/
 
 **Built with care — combining Cloud, AI, and Security into a single production-grade application.**
 
-*If this project helped you or impressed you, please star it — it means a lot!*
 
 </div>
