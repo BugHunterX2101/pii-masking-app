@@ -10,8 +10,6 @@ app_port: 7860
 
 <div align="center">
 
-<img src="https://img.icons8.com/?size=256&id=Rngp-n9p0S0v&format=png" width="120" alt="Shield Logo" />
-
 # Enterprise Privacy Suite
 **Intelligent Data Loss Prevention (DLP) & PII Redaction Engine**
 
