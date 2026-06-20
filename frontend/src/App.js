@@ -541,7 +541,9 @@ export default function App() {
                     handleFileSelect(e.dataTransfer.files[0]);
                   }
                 }}
-                onClick={() => fileInputRef.current?.click()}
+                onClick={() => {
+                  if (!file) fileInputRef.current?.click();
+                }}
               >
                 {/* Component 1: Animated Scanning Line */}
                 <div className="scan-line"></div>
@@ -581,8 +583,9 @@ export default function App() {
                   <div className="shield-ring"></div>
                   <ShieldAlert size={36} className="shield-icon" />
                 </div>
-                <p>AI Masking in Progress...</p>
-                {taskMessage && <p className="task-message-detail" style={{fontSize: '0.85rem', color: 'var(--text-light)', marginTop: '0.5rem'}}>{taskMessage}</p>}
+                <p style={{ fontWeight: 600, color: 'var(--text)', fontSize: '1.1rem' }}>
+                  {taskMessage || 'Initializing AI Engine...'}
+                </p>
               </div>
             )}
 
