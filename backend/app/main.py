@@ -151,8 +151,11 @@ def sync_user(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)
     
     user = db.query(models.User).filter(models.User.username == sub).first()
     if not user:
-        is_first = db.query(models.User).count() == 0
-        role = "admin" if is_first else "user"
+        # Check environment variable whitelist for admin promotion
+        admin_emails = [e.strip() for e in os.getenv("ADMIN_EMAILS", "").split(",") if e.strip()]
+        user_email = payload.get("email", "")
+        
+        role = "admin" if user_email and user_email in admin_emails else "user"
         # We store Auth0 'sub' in username field. Hashed password is N/A for SSO.
         user = models.User(username=sub, hashed_password="SSO", role=role)
         db.add(user)

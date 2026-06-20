@@ -333,8 +333,9 @@ AWS_SECRET_ACCESS_KEY=xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 # — Redis (Celery Broker & Backend) ------------------------
 REDIS_URL=redis://localhost:6379/0
 
-# — Auth0 SSO ----------------------------------------------
+# — Auth0 SSO & Roles ----------------------------------------
 AUTH0_DOMAIN=your-tenant.us.auth0.com
+ADMIN_EMAILS=ceo@company.com,security@company.com
 
 # — GCP Vision (path to service account JSON) --------------
 GOOGLE_APPLICATION_CREDENTIALS=/path/to/your-gcp-key.json
