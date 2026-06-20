@@ -78,6 +78,12 @@ def process_batch_task(self, s3_key: str, active_entities: list[str], masking_st
         zip_bytes = response['Body'].read()
         
         in_zip = zipfile.ZipFile(io.BytesIO(zip_bytes))
+        
+        # Zip Bomb Prevention
+        total_uncompressed_size = sum([info.file_size for info in in_zip.infolist()])
+        if total_uncompressed_size > 500 * 1024 * 1024: # 500 MB limit
+            raise ValueError(f"Batch zip exceeds safe extraction limits (500MB). Uncompressed size: {total_uncompressed_size/(1024*1024):.1f}MB")
+            
         out_bytes_io = io.BytesIO()
         out_zip = zipfile.ZipFile(out_bytes_io, 'w', zipfile.ZIP_DEFLATED)
         
@@ -102,8 +108,10 @@ def process_batch_task(self, s3_key: str, active_entities: list[str], masking_st
                     out_b, rep = file_handlers.mask_pii_in_image_gcp(file_bytes, active_entities, pii_engine.detect_raw, custom_patterns)
                     out_zip.writestr(f"masked_{filename}", out_b)
                     report_summary.extend(rep)
-            except Exception:
-                continue # Skip failing files in batch
+            except Exception as ex:
+                error_msg = f"Failed to process {filename}: {str(ex)}"
+                out_zip.writestr(f"error_{filename}.txt", error_msg.encode('utf-8'))
+                continue # Skip failing files but record the error
                 
         out_zip.close()
         

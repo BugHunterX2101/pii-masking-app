@@ -416,6 +416,9 @@ STATIC_DIR = os.path.normpath(os.path.join(_THIS_DIR, "..", "..", "frontend", "b
 
 @app.get("/{full_path:path}")
 async def serve_frontend(full_path: str):
+    if full_path.startswith("api/"):
+        raise HTTPException(status_code=404, detail="API route not found")
+        
     if not os.path.isdir(STATIC_DIR):
         return JSONResponse({"info": "Frontend not built."}, status_code=200)
     if full_path:

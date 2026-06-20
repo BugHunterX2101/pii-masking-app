@@ -109,7 +109,27 @@ export default function App() {
   const [role, setRole] = useState('user');
   const [token, setToken] = useState(null);
 
-  const [tab, setTab] = useState('file');
+  const getInitialTab = () => {
+    const hash = window.location.hash.replace('#', '');
+    return ['file', 'text', 'admin'].includes(hash) ? hash : 'file';
+  };
+  const [tab, setTabState] = useState(getInitialTab);
+
+  const setTab = useCallback((newTab) => {
+    setTabState(newTab);
+    window.location.hash = newTab;
+  }, []);
+
+  useEffect(() => {
+    const handleHashChange = () => {
+      const hash = window.location.hash.replace('#', '');
+      if (['file', 'text', 'admin'].includes(hash)) {
+        setTabState(hash);
+      }
+    };
+    window.addEventListener('hashchange', handleHashChange);
+    return () => window.removeEventListener('hashchange', handleHashChange);
+  }, []);
 
   const [file, setFile] = useState(null);
   const [originalPreview, setOriginalPreview] = useState(null);
