@@ -10,8 +10,14 @@ app_port: 7860
 
 <div align="center">
 
+<img src="https://img.icons8.com/?size=256&id=Rngp-n9p0S0v&format=png" width="120" alt="Shield Logo" />
+
 # Enterprise Privacy Suite
-### *Automated Data Loss Prevention (DLP) & PII Redaction at Cloud Scale*
+**Intelligent Data Loss Prevention (DLP) & PII Redaction Engine**
+
+*Protect sensitive customer data before it reaches your database, support agents, or AI models.*
+
+<br/>
 
 [![React](https://img.shields.io/badge/Frontend-React_18-61DAFB?style=for-the-badge&logo=react&logoColor=black)](https://reactjs.org/)
 [![FastAPI](https://img.shields.io/badge/Backend-FastAPI-009688?style=for-the-badge&logo=fastapi)](https://fastapi.tiangolo.com/)
@@ -21,6 +27,8 @@ app_port: 7860
 [![GCP Vision](https://img.shields.io/badge/OCR-GCP_Vision-4285F4?style=for-the-badge&logo=googlecloud)](https://cloud.google.com/vision)
 [![PostgreSQL](https://img.shields.io/badge/Database-PostgreSQL-4169E1?style=for-the-badge&logo=postgresql)](https://www.postgresql.org/)
 [![Docker](https://img.shields.io/badge/Deploy-Docker-2496ED?style=for-the-badge&logo=docker)](https://www.docker.com/)
+
+</div>
 
 <br/>
 
@@ -345,7 +353,7 @@ REDIS_URL=redis://localhost:6379/0
 
 # — Auth0 SSO & Roles ----------------------------------------
 AUTH0_DOMAIN=your-tenant.us.auth0.com
-ADMIN_EMAILS=ceo@company.com,security@company.com
+ADMIN_EMAILS=veditagrawal21@gmail.com,ceo@company.com
 
 # — GCP Vision (path to service account JSON) --------------
 GOOGLE_APPLICATION_CREDENTIALS=/path/to/your-gcp-key.json
