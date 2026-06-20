@@ -18,7 +18,10 @@ from botocore.exceptions import NoCredentialsError
 from backend.app import models, database, auth, pii_engine, file_handlers
 from backend.app.database import engine, get_db
 
-models.Base.metadata.create_all(bind=engine)
+try:
+    models.Base.metadata.create_all(bind=engine)
+except Exception as e:
+    print(f"Database sync warning (safe if concurrent init): {e}")
 
 app = FastAPI(title="Enterprise Privacy Suite", version="4.0.0")
 
@@ -264,7 +267,7 @@ async def upload_file(request: Request, file: UploadFile = File(...), current_us
         s3_key = upload_raw_to_s3(file_bytes, file.filename, media_type)
 
         # Dispatch Celery task
-        from app.worker import process_document_task
+        from backend.app.worker import process_document_task
         task = process_document_task.delay(s3_key, file.filename, media_type, active_entities)
 
         # Log audit for task initiation
@@ -283,7 +286,7 @@ async def upload_file(request: Request, file: UploadFile = File(...), current_us
 
 @app.get("/api/tasks/{task_id}")
 async def get_task_status(task_id: str, current_user: models.User = Depends(get_current_user)):
-    from app.worker import celery_app
+    from backend.app.worker import celery_app
     task_result = celery_app.AsyncResult(task_id)
     
     response = {
