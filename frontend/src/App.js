@@ -565,9 +565,9 @@ export default function App() {
                   <span>Sanitized Output</span>
                 </div>
                 <div className="text-result-body">
-                  <MaskedText text={textResult.masked_text} />
+                  <MaskedText text={textResult.masked} />
                 </div>
-                <DetectionReport report={textResult.report} />
+                <DetectionReport report={textResult.pii_found ? [{ text: "Raw Text Input", pii_types: textResult.pii_types }] : []} />
               </div>
             )}
           </div>

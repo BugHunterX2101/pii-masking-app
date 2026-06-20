@@ -3,19 +3,24 @@ import json
 import urllib.request
 import jwt
 from fastapi import HTTPException, status
+from functools import lru_cache
 
 AUTH0_DOMAIN = os.getenv("AUTH0_DOMAIN", "dev-ro5w3rfa3erdaxmg.us.auth0.com")
 ALGORITHMS = ["RS256"]
 
-def get_auth0_public_key(token: str):
-    """Fetch the JWKS from Auth0 and find the RSA public key for the token."""
+@lru_cache(maxsize=1)
+def _get_jwks():
     url = f"https://{AUTH0_DOMAIN}/.well-known/jwks.json"
     try:
         req = urllib.request.Request(url)
         with urllib.request.urlopen(req) as response:
-            jwks = json.loads(response.read().decode())
+            return json.loads(response.read().decode())
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to fetch JWKS from Auth0: {str(e)}")
+
+def get_auth0_public_key(token: str):
+    """Fetch the JWKS from Auth0 and find the RSA public key for the token."""
+    jwks = _get_jwks()
 
     try:
         unverified_header = jwt.get_unverified_header(token)
