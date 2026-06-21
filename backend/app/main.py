@@ -2,7 +2,7 @@
 PII Masking API — FastAPI backend
 Enterprise Phase 2: Auth0 SSO, AWS S3, Google Cloud Vision OCR
 """
-from fastapi import FastAPI, UploadFile, File, HTTPException, Depends, status, Request, Security
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Depends, status, Request, Security
 from fastapi.responses import Response, JSONResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import OAuth2PasswordBearer
@@ -370,7 +370,7 @@ def get_analytics(db: Session = Depends(get_db), current_user: models.User = Dep
 # App API Routes (Protected)
 # -------------------------------------------------------------------
 @app.post("/api/upload")
-async def upload_file(request: Request, file: UploadFile = File(...), current_user: models.User = Depends(get_current_user), db: Session = Depends(get_db)):
+async def upload_file(request: Request, file: UploadFile = File(...), generate_certificate: bool = Form(False), current_user: models.User = Depends(get_current_user), db: Session = Depends(get_db)):
     file_bytes = await file.read()
     
     ext = file.filename.lower().split('.')[-1] if '.' in file.filename else ''
@@ -385,20 +385,30 @@ async def upload_file(request: Request, file: UploadFile = File(...), current_us
             media_type = "image/jpeg"
         elif ext in ['zip']:
             media_type = "application/zip"
+        elif ext in ['csv']:
+            media_type = "text/csv"
+        elif ext in ['jsonl']:
+            media_type = "application/jsonl"
         else:
             raise HTTPException(status_code=400, detail="Unsupported file format.")
 
         # Upload raw file to S3 first
         s3_key = upload_raw_to_s3(file_bytes, file.filename, media_type)
         active_entities, masking_style, custom_patterns = get_active_entities(db, org_id=current_user.org_id)
+        
+        org = db.query(models.Organization).filter(models.Organization.id == current_user.org_id).first()
+        org_name = org.name if org else "Default Org"
     
         # 2. Dispatch task to Celery
-        if ext == 'zip':
+        if ext in ['csv', 'jsonl']:
+            from backend.app.worker import process_dataset_task
+            task = process_dataset_task.delay(s3_key, file.filename, active_entities, custom_patterns)
+        elif ext == 'zip':
             from backend.app.worker import process_batch_task
             task = process_batch_task.delay(s3_key, active_entities, masking_style, custom_patterns)
         else:
             from backend.app.worker import process_document_task
-            task = process_document_task.delay(s3_key, file.filename, media_type, active_entities, masking_style, custom_patterns)
+            task = process_document_task.delay(s3_key, file.filename, media_type, active_entities, masking_style, custom_patterns, generate_certificate, org_name)
 
         # Log audit for task initiation
         log_audit(db, action="FILE_MASK_TASK_STARTED", ip=request.client.host if request.client else "N/A", details={

@@ -134,6 +134,8 @@ export default function App() {
   const [file, setFile] = useState(null);
   const [originalPreview, setOriginalPreview] = useState(null);
   const [processedUrl, setProcessedUrl] = useState(null);
+  const [certificateUrl, setCertificateUrl] = useState(null);
+  const [generateCertificate, setGenerateCertificate] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
   const [taskMessage, setTaskMessage] = useState('');
   const [error, setError] = useState('');
@@ -334,6 +336,7 @@ export default function App() {
 
     const formData = new FormData();
     formData.append('file', file);
+    formData.append('generate_certificate', generateCertificate);
 
     try {
       const res = await fetch(`${apiUrl}/api/upload`, {
@@ -353,6 +356,7 @@ export default function App() {
         pollTaskStatus(data.task_id);
       } else {
         setProcessedUrl(data.download_url);
+        setCertificateUrl(data.certificate_url || null);
         setReport(data.report);
         setIsLoading(false);
         triggerConfetti();
@@ -374,6 +378,7 @@ export default function App() {
 
       if (data.status === 'SUCCESS') {
         setProcessedUrl(data.result.download_url);
+        setCertificateUrl(data.result.certificate_url || null);
         setReport(data.result.report);
         setIsLoading(false);
         setTaskMessage('');
@@ -400,6 +405,7 @@ export default function App() {
     setFile(null);
     setOriginalPreview(null);
     setProcessedUrl(null);
+    setCertificateUrl(null);
     setReport(null);
     setError('');
     setTaskMessage('');
@@ -521,7 +527,7 @@ export default function App() {
             <div className="stat-icon-wrap"><Layers size={20} /></div>
             <div className="stat-card-content">
               <h4>Supported Formats</h4>
-              <p>PDF · DOCX · IMG</p>
+              <p>PDF · DOCX · IMG · CSV · JSONL</p>
             </div>
           </div>
           <div className="glass-stat-card">
@@ -580,7 +586,7 @@ export default function App() {
                   <>
                     <UploadCloud className="drop-icon" size={48} />
                     <h3 className="drop-title">Drag & drop document or ZIP</h3>
-                    <p className="drop-sub">Support for PDF, DOCX, JPG, PNG, WEBP, ZIP (Batch)</p>
+                    <p className="drop-sub">Support for PDF, DOCX, JPG, PNG, WEBP, CSV, JSONL, ZIP (Batch)</p>
                     <span className="drop-browse">or browse files</span>
                   </>
                 )}
@@ -589,7 +595,7 @@ export default function App() {
                   ref={fileInputRef} 
                   className="file-input-hidden"
                   onChange={(e) => handleFileSelect(e.target.files[0])}
-                  accept=".pdf,.docx,.jpg,.jpeg,.png,.webp,.zip"
+                  accept=".pdf,.docx,.jpg,.jpeg,.png,.webp,.zip,.csv,.jsonl"
                 />
               </div>
             )}
@@ -611,9 +617,15 @@ export default function App() {
             )}
 
             {!isLoading && file && !processedUrl && (
-              <div className="btn-row">
-                <button className="btn-secondary" onClick={handleReset}><RefreshCw size={16}/> Clear</button>
-                <button className="btn-primary" onClick={handleProcess}><Lock size={16}/> Mask Document</button>
+              <div className="btn-row" style={{ flexDirection: 'column', alignItems: 'center', gap: '16px' }}>
+                <label style={{ display: 'flex', alignItems: 'center', gap: '8px', color: 'var(--text)', fontSize: '0.95rem', cursor: 'pointer' }}>
+                  <input type="checkbox" checked={generateCertificate} onChange={e => setGenerateCertificate(e.target.checked)} style={{ width: '18px', height: '18px' }} />
+                  Generate HIPAA Compliance Certificate (PDF/DOCX only)
+                </label>
+                <div className="btn-row">
+                  <button className="btn-secondary" onClick={handleReset}><RefreshCw size={16}/> Clear</button>
+                  <button className="btn-primary" onClick={handleProcess}><Lock size={16}/> Mask Document</button>
+                </div>
               </div>
             )}
 
@@ -633,7 +645,12 @@ export default function App() {
                   <div className="image-card">
                     <div className="image-card-header">
                       <span className="image-card-title"><span className="image-card-title-dot dot-processed"/> Secure Document Generated</span>
-                      <a href={processedUrl} download className="btn-download"><Download size={16} /> Download PDF/DOCX</a>
+                      <div style={{ display: 'flex', gap: '12px' }}>
+                        {certificateUrl && (
+                          <a href={certificateUrl} download className="btn-secondary"><ShieldCheck size={16} /> Certificate</a>
+                        )}
+                        <a href={processedUrl} download className="btn-download"><Download size={16} /> Download File</a>
+                      </div>
                     </div>
                   </div>
                 )}
