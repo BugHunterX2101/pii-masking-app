@@ -469,6 +469,43 @@ async def mask_text(request: Request, req: TextMaskRequest, current_user: models
         "count": len(result["types"]),
     }
 
+class CloudScanRequest(BaseModel):
+    provider: str # "aws" or "azure"
+    bucket_name: str
+    prefix: str = ""
+    access_key: str
+    secret_key: str
+    mode: str = "discovery" # "discovery" or "sanitize"
+
+@app.post("/api/cloud-scan")
+async def cloud_scan_api(request: Request, req: CloudScanRequest, current_user: models.User = Depends(get_current_user), db: Session = Depends(get_db)):
+    active_entities, masking_style, custom_patterns = get_active_entities(db, org_id=current_user.org_id)
+    
+    from backend.app.worker import scan_cloud_bucket_task
+    task = scan_cloud_bucket_task.delay(
+        req.provider,
+        req.bucket_name,
+        req.prefix,
+        req.access_key,
+        req.secret_key,
+        req.mode,
+        active_entities,
+        masking_style,
+        custom_patterns
+    )
+    
+    log_audit(db, action="CLOUD_SCAN_STARTED", ip=request.client.host if request.client else "N/A", details={
+        "provider": req.provider,
+        "bucket": req.bucket_name,
+        "task_id": task.id
+    }, user_id=current_user.id, org_id=current_user.org_id)
+    
+    return JSONResponse(status_code=202, content={
+        "status": "accepted",
+        "task_id": task.id,
+        "message": "Cloud scan is being processed asynchronously."
+    })
+
 # -------------------------------------------------------------------
 # Programmatic API Routes (Protected by API Key)
 # -------------------------------------------------------------------

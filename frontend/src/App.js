@@ -4,7 +4,7 @@ import {
   Search, Image as ImageIcon, Type, CheckCircle, FileText, Lock, 
   AlertTriangle, Download, RefreshCw, UploadCloud, ScanLine, 
   ShieldCheck, LogOut, Settings, Activity, ToggleLeft, ToggleRight, User,
-  ShieldAlert, Layers, Cpu, Zap
+  ShieldAlert, Layers, Cpu, Zap, Database
 } from 'lucide-react';
 import confetti from 'canvas-confetti';
 import './App.css';
@@ -111,7 +111,7 @@ export default function App() {
 
   const getInitialTab = () => {
     const hash = window.location.hash.replace('#', '');
-    return ['file', 'text', 'admin'].includes(hash) ? hash : 'file';
+    return ['file', 'text', 'cloud', 'admin'].includes(hash) ? hash : 'file';
   };
   const [tab, setTabState] = useState(getInitialTab);
 
@@ -123,7 +123,7 @@ export default function App() {
   useEffect(() => {
     const handleHashChange = () => {
       const hash = window.location.hash.replace('#', '');
-      if (['file', 'text', 'admin'].includes(hash)) {
+      if (['file', 'text', 'cloud', 'admin'].includes(hash)) {
         setTabState(hash);
       }
     };
@@ -146,6 +146,11 @@ export default function App() {
   const [textResult, setTextResult] = useState(null);
   const [textLoading, setTextLoading] = useState(false);
   const [textError, setTextError] = useState('');
+
+  const [cloudForm, setCloudForm] = useState({ provider: 'aws', bucket_name: '', prefix: '', access_key: '', secret_key: '', mode: 'discovery' });
+  const [cloudLoading, setCloudLoading] = useState(false);
+  const [cloudResult, setCloudResult] = useState(null);
+  const [cloudError, setCloudError] = useState('');
 
   const [logs, setLogs] = useState([]);
   const [policies, setPolicies] = useState([]);
@@ -433,9 +438,36 @@ export default function App() {
       setTextResult(data);
       setStats(s => ({ ...s, pii: s.pii + (data.report?.length || 0) }));
     } catch (err) {
-      setTextError(err.message || 'Text analysis failed.');
+      setTextError(err.message || 'Failed to analyze text.');
     } finally {
       setTextLoading(false);
+    }
+  };
+
+  const handleCloudScan = async () => {
+    setCloudError('');
+    setCloudResult(null);
+    setCloudLoading(true);
+    
+    try {
+      const res = await fetch(`${apiUrl}/api/cloud-scan`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+        body: JSON.stringify(cloudForm)
+      });
+      
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.detail || 'Scan failed');
+      
+      if (res.status === 202 && data.task_id) {
+        pollTaskStatus(data.task_id, true);
+      } else {
+        setCloudResult(data);
+        setCloudLoading(false);
+      }
+    } catch (err) {
+      setCloudError(err.message || 'Failed to start cloud scan.');
+      setCloudLoading(false);
     }
   };
 
@@ -549,6 +581,7 @@ export default function App() {
         <div className="tab-nav">
           <button className={`tab-btn${tab === 'file' ? ' active' : ''}`} onClick={() => setTab('file')}><FileText size={18} /> Document (Cloud OCR)</button>
           <button className={`tab-btn${tab === 'text' ? ' active' : ''}`} onClick={() => setTab('text')}><Type size={18} /> Text</button>
+          <button className={`tab-btn${tab === 'cloud' ? ' active' : ''}`} onClick={() => setTab('cloud')}><Database size={18} /> Cloud Scan</button>
           {role === 'admin' && (
             <button className={`tab-btn${tab === 'admin' ? ' active' : ''}`} onClick={() => setTab('admin')}><Settings size={18} /> Admin</button>
           )}
@@ -701,6 +734,123 @@ export default function App() {
                   <MaskedText text={textResult.masked} />
                 </div>
                 <DetectionReport report={textResult.pii_found ? [{ text: "Raw Text Input", pii_types: textResult.pii_types }] : []} />
+              </div>
+            )}
+          </div>
+            )}
+          </div>
+        )}
+
+        {tab === 'cloud' && (
+          <div className="text-section">
+            <h3 style={{marginBottom: '16px'}}><Database size={20} style={{verticalAlign: 'middle', marginRight: '8px'}}/> Cloud Data Discovery</h3>
+            <p style={{color: 'var(--text-muted)', marginBottom: '24px'}}>Scan entire AWS S3 or Azure Blob buckets for sensitive PII. Connect your data source securely.</p>
+            
+            <div className="admin-card" style={{marginBottom: '24px'}}>
+              <div className="text-input-wrap" style={{marginBottom: '16px'}}>
+                <label>Cloud Provider</label>
+                <select 
+                  className="config-input" 
+                  value={cloudForm.provider} 
+                  onChange={e => setCloudForm({...cloudForm, provider: e.target.value})}
+                  disabled={cloudLoading}
+                >
+                  <option value="aws">AWS S3</option>
+                  <option value="azure">Azure Blob Storage</option>
+                </select>
+              </div>
+
+              <div className="text-input-wrap" style={{marginBottom: '16px'}}>
+                <label>Bucket / Container Name</label>
+                <input 
+                  type="text" 
+                  className="config-input" 
+                  value={cloudForm.bucket_name} 
+                  onChange={e => setCloudForm({...cloudForm, bucket_name: e.target.value})} 
+                  placeholder="e.g. my-production-data"
+                  disabled={cloudLoading}
+                />
+              </div>
+
+              <div className="text-input-wrap" style={{marginBottom: '16px'}}>
+                <label>Prefix / Folder (Optional)</label>
+                <input 
+                  type="text" 
+                  className="config-input" 
+                  value={cloudForm.prefix} 
+                  onChange={e => setCloudForm({...cloudForm, prefix: e.target.value})} 
+                  placeholder="e.g. 2024/uploads/"
+                  disabled={cloudLoading}
+                />
+              </div>
+
+              <div className="text-input-wrap" style={{marginBottom: '16px'}}>
+                <label>{cloudForm.provider === 'aws' ? 'AWS Access Key ID' : 'Connection String'}</label>
+                <input 
+                  type="text" 
+                  className="config-input" 
+                  value={cloudForm.access_key} 
+                  onChange={e => setCloudForm({...cloudForm, access_key: e.target.value})} 
+                  placeholder={cloudForm.provider === 'aws' ? 'AKIA...' : 'Not required for Azure (use Connection String below)'}
+                  disabled={cloudLoading || cloudForm.provider === 'azure'}
+                />
+              </div>
+
+              <div className="text-input-wrap" style={{marginBottom: '24px'}}>
+                <label>{cloudForm.provider === 'aws' ? 'AWS Secret Access Key' : 'Azure Connection String'}</label>
+                <input 
+                  type="password" 
+                  className="config-input" 
+                  value={cloudForm.secret_key} 
+                  onChange={e => setCloudForm({...cloudForm, secret_key: e.target.value})} 
+                  placeholder="••••••••••••••••"
+                  disabled={cloudLoading}
+                />
+              </div>
+              
+              <div className="text-input-wrap" style={{marginBottom: '24px'}}>
+                <label>Operation Mode</label>
+                <select 
+                  className="config-input" 
+                  value={cloudForm.mode} 
+                  onChange={e => setCloudForm({...cloudForm, mode: e.target.value})}
+                  disabled={cloudLoading}
+                >
+                  <option value="discovery">Discovery Only (Generate JSON Report)</option>
+                  <option value="sanitize">Sanitize (Redact files & write to sanitized/ prefix)</option>
+                </select>
+              </div>
+
+              <div className="btn-row">
+                <button 
+                  className="btn-primary" 
+                  onClick={handleCloudScan} 
+                  disabled={cloudLoading || !cloudForm.bucket_name || !cloudForm.secret_key}
+                >
+                  {cloudLoading ? <><RefreshCw size={16} className="spin"/> {taskMessage || 'Scanning Bucket...'}</> : <><Search size={16}/> Start Bucket Scan</>}
+                </button>
+              </div>
+            </div>
+
+            {cloudError && <div className="alert alert-error"><AlertTriangle size={18} /> {cloudError}</div>}
+
+            {cloudResult && !cloudLoading && (
+              <div className="result-section">
+                <div className="image-card">
+                  <div className="image-card-header">
+                    <span className="image-card-title"><span className="image-card-title-dot dot-processed"/> Scan Complete</span>
+                    <a href={cloudResult.download_url} download className="btn-download"><Download size={16} /> Download Full JSON Report</a>
+                  </div>
+                  <div className="image-card-body">
+                    <p><strong>Files Scanned:</strong> {cloudResult.files_scanned}</p>
+                    <p><strong>Files with Sensitive PII:</strong> {cloudResult.files_with_pii}</p>
+                    <p style={{marginTop: '12px', color: 'var(--text-muted)'}}>
+                      {cloudForm.mode === 'sanitize' 
+                        ? 'The sanitized files have been uploaded back to your bucket under the `sanitized/` prefix.' 
+                        : 'Review the downloaded JSON report for detailed file-level PII analytics.'}
+                    </p>
+                  </div>
+                </div>
               </div>
             )}
           </div>
