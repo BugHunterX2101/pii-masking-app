@@ -59,7 +59,15 @@ def verify_auth0_token(token: str):
         return payload
     except jwt.ExpiredSignatureError:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Token expired")
-    except jwt.JWTClaimsError:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Incorrect claims")
-    except Exception:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
+    except jwt.JWTClaimsError as e:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=f"Incorrect claims: {str(e)}")
+    except Exception as e:
+        print(f"[AUTH ERROR] Token validation failed: {type(e).__name__}: {str(e)}")
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=f"Invalid token: {str(e)}")
+
+def debug_decode(token: str) -> dict:
+    """Decode token without verification — only used for the /api/auth/debug endpoint."""
+    try:
+        return jwt.decode(token, options={"verify_signature": False})
+    except Exception as e:
+        return {"error": str(e)}

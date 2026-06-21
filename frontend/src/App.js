@@ -175,13 +175,34 @@ export default function App() {
           const jwtToken = claims.__raw;
           setToken(jwtToken);
 
+          // Log the raw Auth0 claims for debugging
+          console.log("[AUTH DEBUG] Auth0 ID Token Claims:", claims);
+          console.log("[AUTH DEBUG] email:", claims.email, "| name:", claims.name, "| nickname:", claims.nickname);
+
           const res = await fetch(`${apiUrl}/api/auth/sync`, {
             method: 'POST',
             headers: { 'Authorization': `Bearer ${jwtToken}` }
           });
+          
+          console.log("[AUTH DEBUG] /api/auth/sync status:", res.status);
+          
           if (res.ok) {
             const data = await res.json();
+            console.log("[AUTH DEBUG] sync response:", data);
             setRole(data.role);
+          } else {
+            const errData = await res.json().catch(() => ({}));
+            console.error("[AUTH DEBUG] sync FAILED:", res.status, errData);
+          }
+
+          // Also call debug endpoint to inspect backend token parsing
+          const dbgRes = await fetch(`${apiUrl}/api/auth/debug`, {
+            method: 'POST',
+            headers: { 'Authorization': `Bearer ${jwtToken}` }
+          });
+          if (dbgRes.ok) {
+            const dbg = await dbgRes.json();
+            console.log("[AUTH DEBUG] backend token debug:", dbg);
           }
         } catch (e) {
           console.error("Failed to sync user:", e);

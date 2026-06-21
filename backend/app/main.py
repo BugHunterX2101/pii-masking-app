@@ -218,6 +218,27 @@ def sync_user(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)
     
     return {"status": "synced", "role": user.role, "user_id": user.id}
 
+@app.post("/api/auth/debug")
+def debug_token(token: str = Depends(oauth2_scheme)):
+    """Debug endpoint: returns all claims in the token without validating signature."""
+    claims = auth.debug_decode(token)
+    # Also attempt verified decode and report outcome
+    try:
+        verified = auth.verify_auth0_token(token)
+        verified_status = "OK"
+    except Exception as e:
+        verified = {}
+        verified_status = str(e)
+    return {
+        "raw_claims": claims,
+        "verified_status": verified_status,
+        "email_claim": claims.get("email", "NOT PRESENT"),
+        "name_claim": claims.get("name", "NOT PRESENT"),
+        "nickname_claim": claims.get("nickname", "NOT PRESENT"),
+        "sub_claim": claims.get("sub", "NOT PRESENT"),
+    }
+
+
 # -------------------------------------------------------------------
 # Admin Endpoints
 # -------------------------------------------------------------------
