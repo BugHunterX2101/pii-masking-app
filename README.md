@@ -1,3 +1,13 @@
+---
+title: Enterprise Privacy Suite
+emoji: 🛡️
+colorFrom: blue
+colorTo: indigo
+sdk: docker
+app_port: 7860
+pinned: false
+---
+
 # Enterprise Privacy Suite
 **Intelligent Data Loss Prevention (DLP) & PII Redaction Engine**
 
