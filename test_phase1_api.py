@@ -2,8 +2,8 @@ import requests
 import json
 import uuid
 
-# Configuration - Change this to your local or deployed URL
-BASE_URL = "http://localhost:7860"
+# Configuration - Deployed Hugging Face URL
+BASE_URL = "https://vedit2101-pii-masking-app.hf.space"
 
 def test_api():
     print("=== Phase 1 API Verification ===")

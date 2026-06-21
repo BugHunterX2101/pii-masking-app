@@ -447,6 +447,61 @@ async def api_v1_mask_text(request: Request, req: TextMaskRequest, api_key: mode
         "count": len(result["types"]),
     }
 
+@app.post("/api/v1/sanitize/dataset")
+async def api_v1_sanitize_dataset(
+    request: Request,
+    file: UploadFile = File(...),
+    language: str = None,
+    api_key: models.APIKey = Depends(verify_api_key),
+    db: Session = Depends(get_db)
+):
+    """AI Training Data Sanitization API - Parses CSV/JSONL and replaces PII with synthetic Faker data."""
+    ext = file.filename.lower().split('.')[-1] if '.' in file.filename else ''
+    if ext not in ['csv', 'jsonl']:
+        raise HTTPException(status_code=400, detail="Only .csv and .jsonl files are supported for datasets.")
+        
+    file_bytes = await file.read()
+    media_type = "text/csv" if ext == 'csv' else "application/jsonl"
+    
+    s3_key = upload_raw_to_s3(file_bytes, file.filename, media_type)
+    active_entities, _, custom_patterns = get_active_entities(db, org_id=api_key.org_id)
+    
+    from backend.app.worker import process_dataset_task
+    task = process_dataset_task.delay(s3_key, file.filename, active_entities, custom_patterns, language)
+    
+    log_audit(db, action="API_DATASET_SANITIZATION", ip=request.client.host if request.client else "N/A", details={
+        "filename": file.filename, "task_id": task.id
+    }, org_id=api_key.org_id, api_key_id=api_key.id)
+
+    return JSONResponse(status_code=202, content={
+        "status": "accepted",
+        "task_id": task.id,
+        "message": "Dataset is being sanitized asynchronously."
+    })
+
+@app.post("/api/v1/scan/realtime")
+async def api_v1_scan_realtime(request: Request, req: TextMaskRequest, api_key: models.APIKey = Depends(verify_api_key), db: Session = Depends(get_db)):
+    """Ultra-fast DLP Gateway for Slack/Teams Webhooks (<100ms)"""
+    active_entities, _, custom_patterns = get_active_entities(db, org_id=api_key.org_id)
+    
+    # Fast path: detect_raw avoids the heavy Anonymizer engine if we just need a boolean decision
+    results = pii_engine.detect_raw(req.text, active_entities, custom_patterns, language=req.language)
+    
+    found = len(results) > 0
+    entity_types = list(set([r.entity_type for r in results])) if found else []
+    
+    if found:
+        log_audit(db, action="API_REALTIME_DLP_SCAN", ip=request.client.host if request.client else "N/A", details={
+            "detected": entity_types
+        }, org_id=api_key.org_id, api_key_id=api_key.id)
+        
+    return {
+        "action": "BLOCK" if found else "ALLOW",
+        "pii_found": found,
+        "pii_types": entity_types,
+        "count": len(results)
+    }
+
 # -------------------------------------------------------------------
 # Serve React static build
 # -------------------------------------------------------------------

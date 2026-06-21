@@ -145,3 +145,72 @@ def detect_raw(text: str, active_entities: list[str], custom_patterns: list = No
     # Remove overlaps to prevent downstream processing errors
     return _remove_overlaps(results)
 
+_faker_instances = {}
+
+def _get_faker(language: str):
+    from faker import Faker
+    locale_map = {
+        'en': 'en_US', 'es': 'es_ES', 'fr': 'fr_FR', 'de': 'de_DE',
+        'it': 'it_IT', 'pt': 'pt_BR', 'ja': 'ja_JP', 'zh': 'zh_CN'
+    }
+    locale = locale_map.get(language, 'en_US')
+    if locale not in _faker_instances:
+        _faker_instances[locale] = Faker(locale)
+    return _faker_instances[locale]
+
+def detect_and_synthesize_text(text: str, active_entities: list[str], custom_patterns: list = None, language: str = None) -> dict:
+    """
+    Analyzes text and replaces PII with statistically realistic synthetic data using Faker.
+    Used for AI Training Data Sanitization to preserve utility.
+    """
+    if not text.strip():
+        return {"found": False, "types": [], "redacted": text}
+
+    if not language:
+        try:
+            language = langdetect.detect(text)
+            if language not in SUPPORTED_LANGUAGES:
+                language = 'en'
+        except:
+            language = 'en'
+
+    results = _get_analyzer().analyze(text=text, entities=active_entities, language=language) if active_entities else []
+    results.extend(_apply_custom_regex(text, custom_patterns))
+    results = _remove_overlaps(results)
+    
+    if not results:
+        return {"found": False, "types": [], "redacted": text}
+
+    all_entity_types = set([r.entity_type for r in results])
+    fake = _get_faker(language)
+    
+    def generate_fake(entity_type):
+        if entity_type == "PERSON": return fake.name()
+        if entity_type == "EMAIL_ADDRESS": return fake.email()
+        if entity_type == "PHONE_NUMBER": return fake.phone_number()
+        if entity_type == "CREDIT_CARD": return fake.credit_card_number()
+        if entity_type in ["IBAN", "IBAN_CODE"]: return fake.iban()
+        if entity_type in ["US_SSN"]: return fake.ssn()
+        if entity_type in ["LOCATION", "ADDRESS"]: return fake.address().replace('\n', ', ')
+        if entity_type == "DATE_TIME": return str(fake.date())
+        # Healthcare fallback
+        if entity_type == "PROVIDER_NPI": return str(fake.random_number(digits=10, fix_len=True))
+        if entity_type == "MEDICAL_RECORD_NUMBER": return fake.bothify(text='MRN-####-????').upper()
+        if entity_type == "HEALTH_PLAN_ID": return fake.bothify(text='HPI-######')
+        if entity_type == "ICD10_CODE": return fake.bothify(text='?##.#').upper()
+        return f"[{entity_type}_SYNTHETIC]"
+
+    # Replace from back to front to avoid index shifting
+    redacted = text
+    results.sort(key=lambda x: x.start, reverse=True)
+    
+    for res in results:
+        fake_val = generate_fake(res.entity_type)
+        redacted = redacted[:res.start] + fake_val + redacted[res.end:]
+
+    return {
+        "found": True,
+        "types": list(all_entity_types),
+        "redacted": redacted
+    }
+

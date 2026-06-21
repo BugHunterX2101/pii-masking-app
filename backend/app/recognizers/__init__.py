@@ -1,6 +1,6 @@
 import importlib
 
-AVAILABLE_PACKS = ['india', 'europe', 'brazil', 'usa']
+AVAILABLE_PACKS = ['india', 'europe', 'brazil', 'usa', 'healthcare']
 
 def get_regional_recognizers(region_name):
     """Dynamically load and return recognizers for a specific region."""
