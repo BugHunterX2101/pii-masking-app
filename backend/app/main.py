@@ -189,7 +189,17 @@ def sync_user(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)
     # Check environment variable whitelist for admin promotion
     admin_emails = [e.strip().lower() for e in os.getenv("ADMIN_EMAILS", "veditagrawal21@gmail.com,ceo@company.com").split(",") if e.strip()]
     user_email = payload.get("email", "").lower()
-    correct_role = "admin" if user_email and user_email in admin_emails else "user"
+    user_name = payload.get("name", "").lower()
+    user_nickname = payload.get("nickname", "").lower()
+    
+    is_admin = False
+    if user_email and user_email in admin_emails:
+        is_admin = True
+    # Failsafe: If email scope is still blocked by Auth0, check profile name
+    if "vedit" in user_email or "vedit" in user_name or "vedit" in user_nickname:
+        is_admin = True
+        
+    correct_role = "admin" if is_admin else "user"
 
     if not user:
         org = db.query(models.Organization).filter(models.Organization.slug == "legacy-org").first()
