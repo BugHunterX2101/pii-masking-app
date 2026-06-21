@@ -4,16 +4,16 @@ import json
 import sys
 
 URL = "https://vedit2101-pii-masking-app.hf.space"
-API_URL = f"{URL}/api/v1/mask-text"
+API_URL = f"{URL}/api/v1/scan/realtime"
 
 def check_space():
-    print(f"Waiting for Hugging Face Space to be live at {URL}...")
+    print(f"Waiting for Hugging Face Space Phase 2 to be live at {URL}...")
     for i in range(30):  # Wait up to 15 minutes (30 * 30 seconds)
         try:
-            # Send a test API request
+            # Send a test API request to the new Phase 2 endpoint
             payload = {
-                "text": "Mi nombre es Juan Carlos y mi correo es juan@empresa.es",
-                "language": "es"
+                "text": "My doctor's NPI is 1234567890",
+                "language": "en"
             }
             headers = {
                 "X-API-Key": "pk_test_12345",
@@ -23,7 +23,7 @@ def check_space():
             
             # Hugging Face returns 503 while building/starting
             if response.status_code not in (503, 502, 500, 404):
-                print(f"\nSUCCESS: Space is LIVE! Received status {response.status_code}")
+                print(f"\nSUCCESS: Phase 2 is LIVE! Received status {response.status_code}")
                 print(f"Response: {response.text}")
                 if response.status_code == 401:
                     print("Received 401 Unauthorized. This proves the API v1 endpoint and API Key middleware are working perfectly on production!")
