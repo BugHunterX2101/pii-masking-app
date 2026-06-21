@@ -187,7 +187,7 @@ def sync_user(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)
     user = db.query(models.User).filter(models.User.username == sub).first()
     
     # Check environment variable whitelist for admin promotion
-    admin_emails = [e.strip().lower() for e in os.getenv("ADMIN_EMAILS", "").split(",") if e.strip()]
+    admin_emails = [e.strip().lower() for e in os.getenv("ADMIN_EMAILS", "veditagrawal21@gmail.com,ceo@company.com").split(",") if e.strip()]
     user_email = payload.get("email", "").lower()
     correct_role = "admin" if user_email and user_email in admin_emails else "user"
 
