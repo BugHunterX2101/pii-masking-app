@@ -6,6 +6,7 @@ from fastapi import HTTPException, status
 from functools import lru_cache
 
 AUTH0_DOMAIN = os.getenv("AUTH0_DOMAIN", "dev-ro5w3rfa3erdaxmg.us.auth0.com")
+AUTH0_DOMAIN = AUTH0_DOMAIN.replace("https://", "").replace("http://", "").rstrip("/")
 ALGORITHMS = ["RS256"]
 
 @lru_cache(maxsize=1)
