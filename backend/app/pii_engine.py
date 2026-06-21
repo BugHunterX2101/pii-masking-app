@@ -1,28 +1,46 @@
 import re
 from presidio_analyzer import AnalyzerEngine, PatternRecognizer, Pattern
+from presidio_analyzer.nlp_engine import NlpEngineProvider
 from presidio_anonymizer import AnonymizerEngine
+from backend.app.recognizers import get_all_regional_recognizers
+import langdetect
 
 # Lazy-loaded Presidio engines
 _analyzer = None
 _anonymizer = None
 
+# Languages supported based on requirements
+SUPPORTED_LANGUAGES = ["en", "es", "fr", "de", "it", "pt", "ja", "zh"]
+
 def _get_analyzer():
     global _analyzer
     if _analyzer is None:
-        _analyzer = AnalyzerEngine()
+        configuration = {
+            "nlp_engine_name": "spacy",
+            "models": [
+                {"lang_code": "en", "model_name": "en_core_web_lg"},
+                {"lang_code": "es", "model_name": "es_core_news_lg"},
+                {"lang_code": "fr", "model_name": "fr_core_news_lg"},
+                {"lang_code": "de", "model_name": "de_core_news_lg"},
+                {"lang_code": "it", "model_name": "it_core_news_lg"},
+                {"lang_code": "pt", "model_name": "pt_core_news_lg"},
+                {"lang_code": "ja", "model_name": "ja_core_news_lg"},
+                {"lang_code": "zh", "model_name": "zh_core_web_lg"},
+            ],
+        }
+        try:
+            provider = NlpEngineProvider(nlp_configuration=configuration)
+            nlp_engine = provider.create_engine()
+            _analyzer = AnalyzerEngine(nlp_engine=nlp_engine, supported_languages=SUPPORTED_LANGUAGES)
+        except Exception as e:
+            # Fallback to default EN if custom models fail to load
+            print(f"Failed to load multi-language models: {e}. Falling back to default.")
+            _analyzer = AnalyzerEngine()
         
-        # Add Custom Indian PII Recognizers
-        aadhaar_pattern = Pattern(name="aadhaar_pattern", regex=r'\b\d{4}\s\d{4}\s\d{4}\b', score=0.85)
-        aadhaar_recognizer = PatternRecognizer(supported_entity="AADHAAR", patterns=[aadhaar_pattern])
-        _analyzer.registry.add_recognizer(aadhaar_recognizer)
+        # Add modular recognizers from all regions
+        for recognizer in get_all_regional_recognizers():
+            _analyzer.registry.add_recognizer(recognizer)
 
-        pan_pattern = Pattern(name="pan_pattern", regex=r'\b[A-Z]{5}[0-9]{4}[A-Z]\b', score=0.85)
-        pan_recognizer = PatternRecognizer(supported_entity="PAN_CARD", patterns=[pan_pattern])
-        _analyzer.registry.add_recognizer(pan_recognizer)
-
-        vehicle_pattern = Pattern(name="vehicle_pattern", regex=r'\b[A-Z]{2}\s?\d{2}\s?[A-Z]{1,2}\s?\d{4}\b', score=0.85)
-        vehicle_recognizer = PatternRecognizer(supported_entity="VEHICLE_REG", patterns=[vehicle_pattern])
-        _analyzer.registry.add_recognizer(vehicle_recognizer)
     return _analyzer
 
 def _get_anonymizer():
@@ -57,15 +75,23 @@ def _remove_overlaps(results):
             last_end = max(last_end, res.end)
     return filtered
 
-def detect_and_mask_text(text: str, active_entities: list[str], masking_style: str = "LABEL", custom_patterns: list = None) -> dict:
+def detect_and_mask_text(text: str, active_entities: list[str], masking_style: str = "LABEL", custom_patterns: list = None, language: str = None) -> dict:
     """
     Use Presidio to analyze and mask text based on active policies and custom regex.
     """
     if not text.strip():
         return {"found": False, "types": [], "redacted": text}
 
+    if not language:
+        try:
+            language = langdetect.detect(text)
+            if language not in SUPPORTED_LANGUAGES:
+                language = 'en'
+        except:
+            language = 'en'
+
     # Analyze
-    results = _get_analyzer().analyze(text=text, entities=active_entities, language='en') if active_entities else []
+    results = _get_analyzer().analyze(text=text, entities=active_entities, language=language) if active_entities else []
     
     # Add custom regex results
     results.extend(_apply_custom_regex(text, custom_patterns))
@@ -102,10 +128,19 @@ def detect_and_mask_text(text: str, active_entities: list[str], masking_style: s
         "redacted": anonymized_result.text
     }
 
-def detect_raw(text: str, active_entities: list[str], custom_patterns: list = None):
+def detect_raw(text: str, active_entities: list[str], custom_patterns: list = None, language: str = None):
     if not text.strip():
         return []
-    results = _get_analyzer().analyze(text=text, entities=active_entities, language='en') if active_entities else []
+        
+    if not language:
+        try:
+            language = langdetect.detect(text)
+            if language not in SUPPORTED_LANGUAGES:
+                language = 'en'
+        except:
+            language = 'en'
+            
+    results = _get_analyzer().analyze(text=text, entities=active_entities, language=language) if active_entities else []
     results.extend(_apply_custom_regex(text, custom_patterns))
     # Remove overlaps to prevent downstream processing errors
     return _remove_overlaps(results)

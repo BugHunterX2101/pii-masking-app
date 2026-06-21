@@ -2,15 +2,17 @@
 PII Masking API — FastAPI backend
 Enterprise Phase 2: Auth0 SSO, AWS S3, Google Cloud Vision OCR
 """
-from fastapi import FastAPI, UploadFile, File, HTTPException, Depends, status, Request
+from fastapi import FastAPI, UploadFile, File, HTTPException, Depends, status, Request, Security
 from fastapi.responses import Response, JSONResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import OAuth2PasswordBearer
+from fastapi.security.api_key import APIKeyHeader
 from sqlalchemy.orm import Session
 import os
 import json
 import io
 import uuid
+import hashlib
 from pydantic import BaseModel
 import boto3
 from botocore.exceptions import NoCredentialsError
@@ -20,6 +22,16 @@ from backend.app.database import engine, get_db
 
 try:
     models.Base.metadata.create_all(bind=engine)
+    # Initialize Default Organization
+    db = database.SessionLocal()
+    try:
+        default_org = db.query(models.Organization).filter(models.Organization.slug == "legacy-org").first()
+        if not default_org:
+            default_org = models.Organization(name="Legacy Org", slug="legacy-org", plan="enterprise")
+            db.add(default_org)
+            db.commit()
+    finally:
+        db.close()
 except Exception as e:
     print(f"Database sync warning (safe if concurrent init): {e}")
 
@@ -55,6 +67,16 @@ if gcp_creds:
 # -------------------------------------------------------------------
 # We still use OAuth2PasswordBearer to extract the token from the header
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="none")
+api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
+
+def verify_api_key(api_key: str = Security(api_key_header), db: Session = Depends(get_db)):
+    if not api_key:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing API Key")
+    key_hash = hashlib.sha256(api_key.encode()).hexdigest()
+    db_key = db.query(models.APIKey).filter(models.APIKey.key_hash == key_hash, models.APIKey.is_active == True).first()
+    if not db_key:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid API Key")
+    return db_key
 
 def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)):
     payload = auth.verify_auth0_token(token)
@@ -75,28 +97,41 @@ def require_admin(current_user: models.User = Depends(get_current_user)):
 # -------------------------------------------------------------------
 # Helper: Get active policies & Logging
 # -------------------------------------------------------------------
-def get_active_entities(db: Session):
-    policies = db.query(models.DLPPolicy).filter(models.DLPPolicy.is_active == True).all()
+def get_active_entities(db: Session, org_id: int = None):
+    # If org_id is provided, filter by it. Otherwise fallback (for legacy)
+    query = db.query(models.DLPPolicy)
+    if org_id is not None:
+        query = query.filter(models.DLPPolicy.org_id == org_id)
+        
+    policies = query.filter(models.DLPPolicy.is_active == True).all()
     if not policies:
         default = ["PERSON", "EMAIL_ADDRESS", "PHONE_NUMBER", "CREDIT_CARD", "AADHAAR", "PAN_CARD"]
         for p in default:
-            db.add(models.DLPPolicy(pii_type=p, is_active=True))
+            db.add(models.DLPPolicy(pii_type=p, is_active=True, org_id=org_id))
         db.commit()
         active_entities = default
     else:
         active_entities = [p.pii_type for p in policies]
         
-    settings = db.query(models.SystemSettings).first()
+    settings_query = db.query(models.SystemSettings)
+    if org_id is not None:
+        settings_query = settings_query.filter(models.SystemSettings.org_id == org_id)
+    settings = settings_query.first()
     masking_style = settings.masking_style if settings else "LABEL"
     
-    custom = db.query(models.CustomRegexPolicy).filter(models.CustomRegexPolicy.is_active == True).all()
+    custom_query = db.query(models.CustomRegexPolicy)
+    if org_id is not None:
+        custom_query = custom_query.filter(models.CustomRegexPolicy.org_id == org_id)
+    custom = custom_query.filter(models.CustomRegexPolicy.is_active == True).all()
     custom_patterns = [{"name": c.name, "pattern": c.pattern} for c in custom]
     
     return active_entities, masking_style, custom_patterns
 
-def log_audit(db: Session, user_id: int, action: str, ip: str, details: dict):
+def log_audit(db: Session, action: str, ip: str, details: dict, user_id: int = None, org_id: int = None, api_key_id: str = None):
     log = models.AuditLog(
         user_id=user_id,
+        org_id=org_id,
+        api_key_id=api_key_id,
         action=action,
         ip_address=ip,
         details=details
@@ -157,8 +192,9 @@ def sync_user(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)
     correct_role = "admin" if user_email and user_email in admin_emails else "user"
 
     if not user:
+        org = db.query(models.Organization).filter(models.Organization.slug == "legacy-org").first()
         # We store Auth0 'sub' in username field. Hashed password is N/A for SSO.
-        user = models.User(username=sub, hashed_password="SSO", role=correct_role)
+        user = models.User(username=sub, hashed_password="SSO", role=correct_role, org_id=org.id if org else None)
         db.add(user)
     else:
         # Always sync the user's role on login to ensure Zero-Trust compliance
@@ -168,7 +204,7 @@ def sync_user(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)
     db.refresh(user)
         
     ip = request.client.host if request and request.client else "N/A"
-    log_audit(db, user.id, "LOGIN", ip, {"provider": "Auth0"})
+    log_audit(db, action="LOGIN", ip=ip, details={"provider": "Auth0"}, user_id=user.id, org_id=user.org_id)
     
     return {"status": "synced", "role": user.role, "user_id": user.id}
 
@@ -323,7 +359,7 @@ async def upload_file(request: Request, file: UploadFile = File(...), current_us
 
         # Upload raw file to S3 first
         s3_key = upload_raw_to_s3(file_bytes, file.filename, media_type)
-        active_entities, masking_style, custom_patterns = get_active_entities(db)
+        active_entities, masking_style, custom_patterns = get_active_entities(db, org_id=current_user.org_id)
     
         # 2. Dispatch task to Celery
         if ext == 'zip':
@@ -334,10 +370,10 @@ async def upload_file(request: Request, file: UploadFile = File(...), current_us
             task = process_document_task.delay(s3_key, file.filename, media_type, active_entities, masking_style, custom_patterns)
 
         # Log audit for task initiation
-        log_audit(db, current_user.id, "FILE_MASK_TASK_STARTED", request.client.host if request.client else "N/A", {
+        log_audit(db, action="FILE_MASK_TASK_STARTED", ip=request.client.host if request.client else "N/A", details={
             "filename": file.filename,
             "task_id": task.id
-        })
+        }, user_id=current_user.id, org_id=current_user.org_id)
 
         return JSONResponse(status_code=202, content={
             "status": "accepted",
@@ -369,16 +405,39 @@ async def get_task_status(task_id: str, current_user: models.User = Depends(get_
 
 class TextMaskRequest(BaseModel):
     text: str
+    language: str = None
 
 @app.post("/api/mask-text")
 async def mask_text(request: Request, req: TextMaskRequest, current_user: models.User = Depends(get_current_user), db: Session = Depends(get_db)):
-    active_entities, masking_style, custom_patterns = get_active_entities(db)
-    result = pii_engine.detect_and_mask_text(req.text, active_entities, masking_style, custom_patterns)
+    active_entities, masking_style, custom_patterns = get_active_entities(db, org_id=current_user.org_id)
+    result = pii_engine.detect_and_mask_text(req.text, active_entities, masking_style, custom_patterns, language=req.language)
     
     if result["found"]:
-        log_audit(db, current_user.id, "TEXT_MASK", request.client.host if request.client else "N/A", {
+        log_audit(db, action="TEXT_MASK", ip=request.client.host if request.client else "N/A", details={
             "detected": result["types"]
-        })
+        }, user_id=current_user.id, org_id=current_user.org_id)
+        
+    return {
+        "original": req.text,
+        "masked": result["redacted"],
+        "pii_found": result["found"],
+        "pii_types": result["types"],
+        "count": len(result["types"]),
+    }
+
+# -------------------------------------------------------------------
+# Programmatic API Routes (Protected by API Key)
+# -------------------------------------------------------------------
+@app.post("/api/v1/mask-text")
+async def api_v1_mask_text(request: Request, req: TextMaskRequest, api_key: models.APIKey = Depends(verify_api_key), db: Session = Depends(get_db)):
+    active_entities, masking_style, custom_patterns = get_active_entities(db, org_id=api_key.org_id)
+    
+    result = pii_engine.detect_and_mask_text(req.text, active_entities, masking_style, custom_patterns, language=req.language)
+    
+    if result["found"]:
+        log_audit(db, action="API_TEXT_MASK", ip=request.client.host if request.client else "N/A", details={
+            "detected": result["types"]
+        }, org_id=api_key.org_id, api_key_id=api_key.id)
         
     return {
         "original": req.text,
