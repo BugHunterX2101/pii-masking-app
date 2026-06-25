@@ -13,6 +13,7 @@ import json
 import io
 import uuid
 import hashlib
+from typing import Optional
 from pydantic import BaseModel
 import boto3
 from botocore.exceptions import NoCredentialsError
@@ -97,7 +98,7 @@ def require_admin(current_user: models.User = Depends(get_current_user)):
 # -------------------------------------------------------------------
 # Helper: Get active policies & Logging
 # -------------------------------------------------------------------
-def get_active_entities(db: Session, org_id: int = None):
+def get_active_entities(db: Session, org_id: Optional[int] = None):
     # If org_id is provided, filter by it. Otherwise fallback (for legacy)
     query = db.query(models.DLPPolicy)
     if org_id is not None:
@@ -111,13 +112,13 @@ def get_active_entities(db: Session, org_id: int = None):
         db.commit()
         active_entities = default
     else:
-        active_entities = [p.pii_type for p in policies]
+        active_entities = [str(p.pii_type) for p in policies]
         
     settings_query = db.query(models.SystemSettings)
     if org_id is not None:
         settings_query = settings_query.filter(models.SystemSettings.org_id == org_id)
     settings = settings_query.first()
-    masking_style = settings.masking_style if settings else "LABEL"
+    masking_style = str(settings.masking_style) if settings else "LABEL"
     
     custom_query = db.query(models.CustomRegexPolicy)
     if org_id is not None:
@@ -127,7 +128,7 @@ def get_active_entities(db: Session, org_id: int = None):
     
     return active_entities, masking_style, custom_patterns
 
-def log_audit(db: Session, action: str, ip: str, details: dict, user_id: int = None, org_id: int = None, api_key_id: str = None):
+def log_audit(db: Session, action: str, ip: str, details: dict, user_id: Optional[int] = None, org_id: Optional[int] = None, api_key_id: Optional[str] = None):
     log = models.AuditLog(
         user_id=user_id,
         org_id=org_id,
@@ -179,7 +180,7 @@ def upload_to_s3_and_get_url(file_bytes: bytes, filename: str, content_type: str
 # Auth0 Sync Route
 # -------------------------------------------------------------------
 @app.post("/api/auth/sync")
-def sync_user(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db), request: Request = None):
+def sync_user(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db), request: Optional[Request] = None):
     """Called by frontend right after Auth0 login to sync the user to our Postgres DB."""
     payload = auth.verify_auth0_token(token)
     sub = payload.get("sub")
@@ -376,7 +377,7 @@ def get_analytics(db: Session = Depends(get_db), current_user: models.User = Dep
 async def upload_file(request: Request, file: UploadFile = File(...), generate_certificate: bool = Form(False), current_user: models.User = Depends(get_current_user), db: Session = Depends(get_db)):
     file_bytes = await file.read()
     
-    ext = file.filename.lower().split('.')[-1] if '.' in file.filename else ''
+    ext = file.filename.lower().split('.')[-1] if file.filename and '.' in file.filename else ''
     
     try:
         # Determine media type based on extension
@@ -449,7 +450,7 @@ async def get_task_status(task_id: str, current_user: models.User = Depends(get_
 
 class TextMaskRequest(BaseModel):
     text: str
-    language: str = None
+    language: Optional[str] = None
 
 @app.post("/api/mask-text")
 async def mask_text(request: Request, req: TextMaskRequest, current_user: models.User = Depends(get_current_user), db: Session = Depends(get_db)):
@@ -459,7 +460,7 @@ async def mask_text(request: Request, req: TextMaskRequest, current_user: models
     if result["found"]:
         log_audit(db, action="TEXT_MASK", ip=request.client.host if request.client else "N/A", details={
             "detected": result["types"]
-        }, user_id=current_user.id, org_id=current_user.org_id)
+        }, user_id=int(current_user.id), org_id=int(current_user.org_id))  # type: ignore
         
     return {
         "original": req.text,
@@ -479,10 +480,10 @@ class CloudScanRequest(BaseModel):
 
 @app.post("/api/cloud-scan")
 async def cloud_scan_api(request: Request, req: CloudScanRequest, current_user: models.User = Depends(get_current_user), db: Session = Depends(get_db)):
-    active_entities, masking_style, custom_patterns = get_active_entities(db, org_id=current_user.org_id)
+    active_entities, masking_style, custom_patterns = get_active_entities(db, org_id=int(current_user.org_id))  # type: ignore
     
     from backend.app.worker import scan_cloud_bucket_task
-    task = scan_cloud_bucket_task.delay(
+    task = scan_cloud_bucket_task.delay(  # type: ignore
         req.provider,
         req.bucket_name,
         req.prefix,
@@ -498,7 +499,7 @@ async def cloud_scan_api(request: Request, req: CloudScanRequest, current_user: 
         "provider": req.provider,
         "bucket": req.bucket_name,
         "task_id": task.id
-    }, user_id=current_user.id, org_id=current_user.org_id)
+    }, user_id=int(current_user.id), org_id=int(current_user.org_id))  # type: ignore
     
     return JSONResponse(status_code=202, content={
         "status": "accepted",
@@ -511,14 +512,14 @@ async def cloud_scan_api(request: Request, req: CloudScanRequest, current_user: 
 # -------------------------------------------------------------------
 @app.post("/api/v1/mask-text")
 async def api_v1_mask_text(request: Request, req: TextMaskRequest, api_key: models.APIKey = Depends(verify_api_key), db: Session = Depends(get_db)):
-    active_entities, masking_style, custom_patterns = get_active_entities(db, org_id=api_key.org_id)
+    active_entities, masking_style, custom_patterns = get_active_entities(db, org_id=int(api_key.org_id))  # type: ignore
     
-    result = pii_engine.detect_and_mask_text(req.text, active_entities, masking_style, custom_patterns, language=req.language)
+    result = pii_engine.detect_and_mask_text(req.text, active_entities, str(masking_style), custom_patterns, language=req.language)
     
     if result["found"]:
         log_audit(db, action="API_TEXT_MASK", ip=request.client.host if request.client else "N/A", details={
             "detected": result["types"]
-        }, org_id=api_key.org_id, api_key_id=api_key.id)
+        }, org_id=int(api_key.org_id), api_key_id=str(api_key.id))  # type: ignore
         
     return {
         "original": req.text,
@@ -532,27 +533,27 @@ async def api_v1_mask_text(request: Request, req: TextMaskRequest, api_key: mode
 async def api_v1_sanitize_dataset(
     request: Request,
     file: UploadFile = File(...),
-    language: str = None,
+    language: Optional[str] = None,
     api_key: models.APIKey = Depends(verify_api_key),
     db: Session = Depends(get_db)
 ):
     """AI Training Data Sanitization API - Parses CSV/JSONL and replaces PII with synthetic Faker data."""
-    ext = file.filename.lower().split('.')[-1] if '.' in file.filename else ''
+    ext = file.filename.lower().split('.')[-1] if file.filename and '.' in file.filename else ''
     if ext not in ['csv', 'jsonl']:
         raise HTTPException(status_code=400, detail="Only .csv and .jsonl files are supported for datasets.")
         
     file_bytes = await file.read()
     media_type = "text/csv" if ext == 'csv' else "application/jsonl"
     
-    s3_key = upload_raw_to_s3(file_bytes, file.filename, media_type)
-    active_entities, _, custom_patterns = get_active_entities(db, org_id=api_key.org_id)
+    s3_key = upload_raw_to_s3(file_bytes, file.filename if file.filename else "dataset", media_type)
+    active_entities, _, custom_patterns = get_active_entities(db, org_id=int(api_key.org_id))  # type: ignore
     
     from backend.app.worker import process_dataset_task
-    task = process_dataset_task.delay(s3_key, file.filename, active_entities, custom_patterns, language)
+    task = process_dataset_task.delay(s3_key, file.filename, active_entities, custom_patterns, language)  # type: ignore
     
     log_audit(db, action="API_DATASET_SANITIZATION", ip=request.client.host if request.client else "N/A", details={
         "filename": file.filename, "task_id": task.id
-    }, org_id=api_key.org_id, api_key_id=api_key.id)
+    }, org_id=int(api_key.org_id), api_key_id=str(api_key.id))  # type: ignore
 
     return JSONResponse(status_code=202, content={
         "status": "accepted",
@@ -563,7 +564,7 @@ async def api_v1_sanitize_dataset(
 @app.post("/api/v1/scan/realtime")
 async def api_v1_scan_realtime(request: Request, req: TextMaskRequest, api_key: models.APIKey = Depends(verify_api_key), db: Session = Depends(get_db)):
     """Ultra-fast DLP Gateway for Slack/Teams Webhooks (<100ms)"""
-    active_entities, _, custom_patterns = get_active_entities(db, org_id=api_key.org_id)
+    active_entities, _, custom_patterns = get_active_entities(db, org_id=int(api_key.org_id))  # type: ignore
     
     # Fast path: detect_raw avoids the heavy Anonymizer engine if we just need a boolean decision
     results = pii_engine.detect_raw(req.text, active_entities, custom_patterns, language=req.language)
@@ -574,7 +575,7 @@ async def api_v1_scan_realtime(request: Request, req: TextMaskRequest, api_key: 
     if found:
         log_audit(db, action="API_REALTIME_DLP_SCAN", ip=request.client.host if request.client else "N/A", details={
             "detected": entity_types
-        }, org_id=api_key.org_id, api_key_id=api_key.id)
+        }, org_id=int(api_key.org_id), api_key_id=str(api_key.id))  # type: ignore
         
     return {
         "action": "BLOCK" if found else "ALLOW",

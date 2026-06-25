@@ -1,4 +1,4 @@
-from presidio_analyzer import Pattern, PatternRecognizer
+from presidio_analyzer import Pattern, PatternRecognizer  # type: ignore
 
 npi_pattern = Pattern(
     name="npi_pattern",

@@ -1,4 +1,4 @@
-from presidio_analyzer import PatternRecognizer, Pattern
+from presidio_analyzer import PatternRecognizer, Pattern  # type: ignore
 
 # CPF: 000.000.000-00
 cpf_pattern = Pattern(name="cpf_pattern", regex=r'\b\d{3}\.\d{3}\.\d{3}-\d{2}\b', score=0.85)

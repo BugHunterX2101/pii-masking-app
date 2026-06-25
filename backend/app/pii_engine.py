@@ -1,9 +1,10 @@
 import re
-from presidio_analyzer import AnalyzerEngine, PatternRecognizer, Pattern
-from presidio_analyzer.nlp_engine import NlpEngineProvider
-from presidio_anonymizer import AnonymizerEngine
+from typing import Optional
+from presidio_analyzer import AnalyzerEngine, PatternRecognizer, Pattern  # type: ignore
+from presidio_analyzer.nlp_engine import NlpEngineProvider  # type: ignore
+from presidio_anonymizer import AnonymizerEngine  # type: ignore
 from backend.app.recognizers import get_all_regional_recognizers
-import langdetect
+import langdetect  # type: ignore
 
 # Lazy-loaded Presidio engines
 _analyzer = None
@@ -49,7 +50,7 @@ def _get_anonymizer():
         _anonymizer = AnonymizerEngine()
     return _anonymizer
 
-def _apply_custom_regex(text: str, custom_patterns: list):
+def _apply_custom_regex(text: str, custom_patterns: Optional[list] = None):
     import re
     from presidio_analyzer import RecognizerResult
     results = []
@@ -75,7 +76,7 @@ def _remove_overlaps(results):
             last_end = max(last_end, res.end)
     return filtered
 
-def detect_and_mask_text(text: str, active_entities: list[str], masking_style: str = "LABEL", custom_patterns: list = None, language: str = None) -> dict:
+def detect_and_mask_text(text: str, active_entities: list[str], masking_style: str = "LABEL", custom_patterns: Optional[list] = None, language: Optional[str] = None) -> dict:
     """
     Use Presidio to analyze and mask text based on active policies and custom regex.
     """
@@ -128,7 +129,7 @@ def detect_and_mask_text(text: str, active_entities: list[str], masking_style: s
         "redacted": anonymized_result.text
     }
 
-def detect_raw(text: str, active_entities: list[str], custom_patterns: list = None, language: str = None):
+def detect_raw(text: str, active_entities: list[str], custom_patterns: Optional[list] = None, language: Optional[str] = None):
     if not text.strip():
         return []
         
@@ -158,7 +159,7 @@ def _get_faker(language: str):
         _faker_instances[locale] = Faker(locale)
     return _faker_instances[locale]
 
-def detect_and_synthesize_text(text: str, active_entities: list[str], custom_patterns: list = None, language: str = None) -> dict:
+def detect_and_synthesize_text(text: str, active_entities: list[str], custom_patterns: Optional[list] = None, language: Optional[str] = None) -> dict:
     """
     Analyzes text and replaces PII with statistically realistic synthetic data using Faker.
     Used for AI Training Data Sanitization to preserve utility.

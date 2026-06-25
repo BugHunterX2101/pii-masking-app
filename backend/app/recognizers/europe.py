@@ -1,4 +1,4 @@
-from presidio_analyzer import PatternRecognizer, Pattern
+from presidio_analyzer import PatternRecognizer, Pattern  # type: ignore
 
 # IBAN (General European Bank Account)
 iban_pattern = Pattern(name="iban_pattern", regex=r'\b[A-Z]{2}[0-9]{2}[A-Z0-9]{4}[0-9]{7}([A-Z0-9]?){0,16}\b', score=0.85)

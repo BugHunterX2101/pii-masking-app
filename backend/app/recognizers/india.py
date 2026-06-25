@@ -1,4 +1,4 @@
-from presidio_analyzer import PatternRecognizer, Pattern
+from presidio_analyzer import PatternRecognizer, Pattern  # type: ignore
 
 # Aadhaar (12 digits, often with spaces)
 aadhaar_pattern = Pattern(name="aadhaar_pattern", regex=r'\b\d{4}\s\d{4}\s\d{4}\b', score=0.85)

@@ -12,8 +12,10 @@ celery_app = Celery("tasks", broker=REDIS_URL, backend=REDIS_URL)
 
 s3_client = boto3.client('s3', region_name=AWS_REGION)
 
+from typing import Optional
+
 @celery_app.task(bind=True)
-def process_document_task(self, s3_key: str, filename: str, content_type: str, active_entities: list[str], masking_style: str = "LABEL", custom_patterns: list = None, generate_certificate: bool = False, org_name: str = "Default Org"):
+def process_document_task(self, s3_key: str, filename: str, content_type: str, active_entities: list[str], masking_style: str = "LABEL", custom_patterns: Optional[list] = None, generate_certificate: bool = False, org_name: str = "Default Org"):
     try:
         # 1. Download raw file from S3
         self.update_state(state='PROCESSING', meta={'status': 'Downloading file...'})
@@ -84,7 +86,7 @@ def process_document_task(self, s3_key: str, filename: str, content_type: str, a
             pass # Best effort cleanup on failure
 
 @celery_app.task(bind=True)
-def process_batch_task(self, s3_key: str, active_entities: list[str], masking_style: str = "LABEL", custom_patterns: list = None):
+def process_batch_task(self, s3_key: str, active_entities: list[str], masking_style: str = "LABEL", custom_patterns: Optional[list] = None):
     import zipfile
     import io
     try:
@@ -159,7 +161,7 @@ def process_batch_task(self, s3_key: str, active_entities: list[str], masking_st
             pass
 
 @celery_app.task(bind=True)
-def process_dataset_task(self, s3_key: str, filename: str, active_entities: list[str], custom_patterns: list = None, language: str = None):
+def process_dataset_task(self, s3_key: str, filename: str, active_entities: list[str], custom_patterns: Optional[list] = None, language: Optional[str] = None):
     import pandas as pd
     import io
     try:
@@ -229,7 +231,7 @@ def process_dataset_task(self, s3_key: str, filename: str, active_entities: list
             pass
 
 @celery_app.task(bind=True)
-def scan_cloud_bucket_task(self, provider: str, bucket_name: str, prefix: str, access_key: str, secret_key: str, mode: str, active_entities: list[str], masking_style: str = "LABEL", custom_patterns: list = None):
+def scan_cloud_bucket_task(self, provider: str, bucket_name: str, prefix: str, access_key: str, secret_key: str, mode: str, active_entities: list[str], masking_style: str = "LABEL", custom_patterns: Optional[list] = None):
     import io
     import boto3
     import json
@@ -239,6 +241,8 @@ def scan_cloud_bucket_task(self, provider: str, bucket_name: str, prefix: str, a
     self.update_state(state='PROCESSING', meta={'status': f'Connecting to {provider.upper()}...'})
     
     files_to_process = []
+    client = None
+    container_client = None
     
     try:
         if provider == "aws":

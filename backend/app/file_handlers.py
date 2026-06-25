@@ -1,8 +1,9 @@
 import fitz  # PyMuPDF
 from docx import Document
 import io
+from typing import Optional
 
-def process_docx(file_bytes: bytes, active_entities: list[str], detect_fn, masking_style: str = "LABEL", custom_patterns: list = None) -> tuple[bytes, list]:
+def process_docx(file_bytes: bytes, active_entities: list[str], detect_fn, masking_style: str = "LABEL", custom_patterns: Optional[list] = None) -> tuple[bytes, list]:
     doc = Document(io.BytesIO(file_bytes))
     report = []
     
@@ -34,7 +35,7 @@ def process_docx(file_bytes: bytes, active_entities: list[str], detect_fn, maski
     return out_io.getvalue(), report
 
 
-def process_pdf(file_bytes: bytes, active_entities: list[str], detect_raw_fn, custom_patterns: list = None) -> tuple[bytes, list]:
+def process_pdf(file_bytes: bytes, active_entities: list[str], detect_raw_fn, custom_patterns: Optional[list] = None) -> tuple[bytes, list]:
     """
     Process native text PDFs using PyMuPDF redactions.
     detect_raw_fn should be a function that returns Presidio analyzer results (so we have start/end chars).
@@ -76,7 +77,7 @@ def process_pdf(file_bytes: bytes, active_entities: list[str], detect_raw_fn, cu
         
     return out_io.getvalue(), report
 
-def mask_pii_in_image_gcp(image_bytes: bytes, active_entities: list[str], detect_raw_fn, custom_patterns: list = None):
+def mask_pii_in_image_gcp(image_bytes: bytes, active_entities: list[str], detect_raw_fn, custom_patterns: Optional[list] = None):
     import cv2
     import numpy as np
     from google.cloud import vision

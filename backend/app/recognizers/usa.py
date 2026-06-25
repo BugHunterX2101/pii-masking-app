@@ -1,4 +1,4 @@
-from presidio_analyzer import PatternRecognizer, Pattern
+from presidio_analyzer import PatternRecognizer, Pattern  # type: ignore
 
 # SSN (Presidio already has this, but adding a specific one if needed. Presidio handles US_SSN natively)
 # Routing Number (9 digits)
