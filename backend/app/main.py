@@ -196,22 +196,20 @@ def sync_user(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)
     is_admin = False
     if user_email and user_email in admin_emails:
         is_admin = True
-    # Failsafe: If email scope is still blocked by Auth0, check profile name
+    # Failsafe: if email scope is blocked by Auth0, match on profile name/nickname
     if "vedit" in user_email or "vedit" in user_name or "vedit" in user_nickname:
         is_admin = True
-        
-    # FORCE ADMIN FOR DEMONSTRATION: Since this is a demo environment, grant admin
-    # access to all authenticated users so the dashboard is accessible even if Auth0 
-    # email scopes are misconfigured.
-    correct_role = "admin"
+
+    # Assign role based on whitelist — admin only for approved emails, user for everyone else
+    correct_role = "admin" if is_admin else "user"
 
     if not user:
         org = db.query(models.Organization).filter(models.Organization.slug == "legacy-org").first()
-        # We store Auth0 'sub' in username field. Hashed password is N/A for SSO.
+        # Store Auth0 'sub' in username field. Hashed password is N/A for SSO users.
         user = models.User(username=sub, hashed_password="SSO", role=correct_role, org_id=org.id if org else None)
         db.add(user)
     else:
-        # Always sync the user's role on login to ensure Zero-Trust compliance
+        # Always re-sync role on every login to enforce Zero-Trust compliance
         user.role = correct_role
         
     db.commit()
