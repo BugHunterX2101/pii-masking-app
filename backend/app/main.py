@@ -180,7 +180,7 @@ def upload_to_s3_and_get_url(file_bytes: bytes, filename: str, content_type: str
 # Auth0 Sync Route
 # -------------------------------------------------------------------
 @app.post("/api/auth/sync")
-def sync_user(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db), request: Optional[Request] = None):
+def sync_user(request: Request, token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)):
     """Called by frontend right after Auth0 login to sync the user to our Postgres DB."""
     payload = auth.verify_auth0_token(token)
     sub = payload.get("sub")
@@ -215,7 +215,7 @@ def sync_user(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)
     db.commit()
     db.refresh(user)
         
-    ip = request.client.host if request and request.client else "N/A"
+    ip = request.client.host if request.client else "N/A"
     log_audit(db, action="LOGIN", ip=ip, details={"provider": "Auth0"}, user_id=user.id, org_id=user.org_id)
     
     return {"status": "synced", "role": user.role, "user_id": user.id}
