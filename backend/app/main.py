@@ -184,24 +184,63 @@ def sync_user(request: Request, token: str = Depends(oauth2_scheme), db: Session
     """Called by frontend right after Auth0 login to sync the user to our Postgres DB."""
     payload = auth.verify_auth0_token(token)
     sub = payload.get("sub")
-    
+
+    # Debug: log every claim Auth0 sent so we can diagnose role issues
+    print(f"[AUTH SYNC] sub={sub}")
+    print(f"[AUTH SYNC] Full JWT payload keys: {list(payload.keys())}")
+    print(f"[AUTH SYNC] email={payload.get('email', 'NOT PRESENT')}")
+    print(f"[AUTH SYNC] name={payload.get('name', 'NOT PRESENT')}")
+    print(f"[AUTH SYNC] nickname={payload.get('nickname', 'NOT PRESENT')}")
+
     user = db.query(models.User).filter(models.User.username == sub).first()
-    
+
     # Check environment variable whitelist for admin promotion
     admin_emails = [e.strip().lower() for e in os.getenv("ADMIN_EMAILS", "veditagrawal21@gmail.com,ceo@company.com").split(",") if e.strip()]
+
+    # Collect ALL string values from the JWT payload — Auth0 can place email in
+    # different claim names depending on the connection type and custom rules.
+    all_claim_values = []
+    for key, value in payload.items():
+        if isinstance(value, str):
+            all_claim_values.append(value.lower())
+        elif isinstance(value, list):
+            for item in value:
+                if isinstance(item, str):
+                    all_claim_values.append(item.lower())
+
     user_email = payload.get("email", "").lower()
     user_name = payload.get("name", "").lower()
     user_nickname = payload.get("nickname", "").lower()
-    
+
     is_admin = False
+
+    # Check 1: Direct email match against whitelist
     if user_email and user_email in admin_emails:
         is_admin = True
-    # Failsafe: if email scope is blocked by Auth0, match on profile name/nickname
-    if "vedit" in user_email or "vedit" in user_name or "vedit" in user_nickname:
-        is_admin = True
+        print(f"[AUTH SYNC] Admin granted via direct email match: {user_email}")
 
-    # Assign role based on whitelist — admin only for approved emails, user for everyone else
+    # Check 2: Scan ALL claim values for admin email (catches non-standard claim names)
+    if not is_admin:
+        for admin_email in admin_emails:
+            for claim_val in all_claim_values:
+                if admin_email in claim_val:
+                    is_admin = True
+                    print(f"[AUTH SYNC] Admin granted via claim value scan: found '{admin_email}' in '{claim_val}'")
+                    break
+            if is_admin:
+                break
+
+    # Check 3: Failsafe — match on name/nickname/email containing "vedit"
+    if not is_admin:
+        for claim_val in all_claim_values:
+            if "vedit" in claim_val:
+                is_admin = True
+                print(f"[AUTH SYNC] Admin granted via 'vedit' failsafe in claim: '{claim_val}'")
+                break
+
+    # Assign role based on checks above
     correct_role = "admin" if is_admin else "user"
+    print(f"[AUTH SYNC] Final role decision: {correct_role} (is_admin={is_admin})")
 
     if not user:
         org = db.query(models.Organization).filter(models.Organization.slug == "legacy-org").first()
@@ -211,14 +250,15 @@ def sync_user(request: Request, token: str = Depends(oauth2_scheme), db: Session
     else:
         # Always re-sync role on every login to enforce Zero-Trust compliance
         user.role = correct_role
-        
+
     db.commit()
     db.refresh(user)
-        
+
     ip = request.client.host if request.client else "N/A"
-    log_audit(db, action="LOGIN", ip=ip, details={"provider": "Auth0"}, user_id=user.id, org_id=user.org_id)
-    
+    log_audit(db, action="LOGIN", ip=ip, details={"provider": "Auth0", "role_assigned": correct_role, "email_claim": user_email or "NOT_PRESENT"}, user_id=user.id, org_id=user.org_id)
+
     return {"status": "synced", "role": user.role, "user_id": user.id}
+
 
 @app.post("/api/auth/debug")
 def debug_token(token: str = Depends(oauth2_scheme)):
