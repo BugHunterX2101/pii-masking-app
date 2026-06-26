@@ -343,11 +343,11 @@ function LiveHeatmap({ text }) {
    MASKED TOKEN RENDERER
    ============================================================ */
 function MaskedText({ text }) {
-  const parts = text.split(/(\[[A-Z_]+_MASKED\])/g);
+  const parts = text.split(/(\[[A-Z0-9_]+_MASKED\])/g);
   return (
     <>
       {parts.map((part, i) => {
-        const match = part.match(/^\[([A-Z_]+)_MASKED\]$/);
+        const match = part.match(/^\[([A-Z0-9_]+)_MASKED\]$/);
         if (match) {
           return (
             <span key={i} className="redaction-bar" title={`Redacted: ${formatType(match[1])}`}>
@@ -451,6 +451,8 @@ export default function App() {
 
   const [role, setRole] = useState('user');
   const [token, setToken] = useState(null);
+  const [authReady, setAuthReady] = useState(false);
+  const [authError, setAuthError] = useState('');
   const [paletteOpen, setPaletteOpen] = useState(false);
 
   const getInitialTab = () => {
@@ -531,9 +533,12 @@ export default function App() {
   useEffect(() => {
     const syncUser = async () => {
       if (isAuthenticated) {
+        setAuthReady(false);
+        setAuthError('');
         try {
           const claims = await getIdTokenClaims();
           const jwtToken = claims.__raw;
+          if (!jwtToken) throw new Error('Auth0 did not return an ID token.');
           setToken(jwtToken);
           console.log('[AUTH DEBUG] Auth0 ID Token Claims:', claims);
 
@@ -545,10 +550,12 @@ export default function App() {
           if (res.ok) {
             const data = await res.json();
             setRole(data.role);
+            setAuthReady(true);
             addToast(`Signed in successfully. Role: ${data.role}`, 'success');
           } else {
             const errData = await res.json().catch(() => ({}));
             console.error('[AUTH DEBUG] sync FAILED:', res.status, errData);
+            throw new Error(errData.detail || 'Unable to synchronize your account with the server.');
           }
 
           const dbgRes = await fetch(`${apiUrl}/api/auth/debug`, {
@@ -558,14 +565,38 @@ export default function App() {
           if (dbgRes.ok) { const dbg = await dbgRes.json(); console.log('[AUTH DEBUG] backend token debug:', dbg); }
         } catch (e) {
           console.error('Failed to sync user:', e);
+          setAuthError(e.message || 'Unable to synchronize your account with the server.');
+          setAuthReady(false);
+          addToast(e.message || 'Unable to synchronize your account with the server.', 'error');
         }
+      } else {
+        setToken(null);
+        setAuthReady(false);
+        setAuthError('');
       }
     };
     syncUser();
   }, [isAuthenticated, getIdTokenClaims, apiUrl, addToast]);
 
+  const requireToken = useCallback(() => {
+    if (!authReady || !token) {
+      throw new Error(authError || 'Secure session is still initializing. Please try again in a moment.');
+    }
+    return token;
+  }, [authReady, authError, token]);
+
+  const readApiError = useCallback(async (res, fallback) => {
+    if (res.status === 401) {
+      logout({ logoutParams: { returnTo: window.location.origin } });
+      return 'Session expired. Please log in again.';
+    }
+    const data = await res.json().catch(() => ({}));
+    return data.detail || data.error || data.message || fallback;
+  }, [logout]);
+
   const loadAdminData = useCallback(async () => {
-    if (!token || role !== 'admin') return;
+    if (!authReady || !token || role !== 'admin') return;
+    setAdminError('');
     try {
       const headers = { 'Authorization': `Bearer ${token}` };
       const urls = [
@@ -576,30 +607,34 @@ export default function App() {
         `${apiUrl}/api/admin/settings`,
         `${apiUrl}/api/admin/analytics`
       ];
-      const responses = await Promise.allSettled(urls.map(url => fetch(url, { headers })));
-      const jsonPromises = responses.map(res =>
-        (res.status === 'fulfilled' && res.value.ok) ? res.value.json() : Promise.resolve(null)
-      );
-      const data = await Promise.all(jsonPromises);
+      const responses = await Promise.all(urls.map(url => fetch(url, { headers })));
+      const failed = responses.find(res => !res.ok);
+      if (failed) {
+        throw new Error(await readApiError(failed, 'Failed to load admin data.'));
+      }
+      const data = await Promise.all(responses.map(res => res.json()));
       if (data[0]) setPolicies(data[0]);
       if (data[1]) setLogs(data[1]);
       if (data[2]) setUsers(data[2]);
       if (data[3]) setCustomRegex(data[3]);
       if (data[4]) setSettings(data[4]);
       if (data[5]) setAnalytics(data[5]);
-    } catch(err) { console.error('Failed to load admin data', err); }
-  }, [apiUrl, token, role]);
+    } catch(err) {
+      console.error('Failed to load admin data', err);
+      setAdminError(err.message || 'Failed to load admin data.');
+    }
+  }, [apiUrl, authReady, token, role, readApiError]);
 
   const handleAddRegex = async () => {
     setAdminError('');
     try {
+      const authToken = requireToken();
       const res = await fetch(`${apiUrl}/api/admin/custom-regex`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${authToken}` },
         body: JSON.stringify({ name: newRegexName, pattern: newRegexPattern })
       });
-      handleApiError(res);
-      if (!res.ok) { const data = await res.json().catch(()=>({})); throw new Error(data.detail || 'Failed to add regex.'); }
+      if (!res.ok) throw new Error(await readApiError(res, 'Failed to add regex.'));
       setNewRegexName(''); setNewRegexPattern('');
       loadAdminData();
       addToast('Custom regex rule added successfully', 'success');
@@ -609,12 +644,12 @@ export default function App() {
   const handleDeleteRegex = async (id) => {
     setAdminError('');
     try {
+      const authToken = requireToken();
       const res = await fetch(`${apiUrl}/api/admin/custom-regex/${id}`, {
         method: 'DELETE',
-        headers: { 'Authorization': `Bearer ${token}` }
+        headers: { 'Authorization': `Bearer ${authToken}` }
       });
-      handleApiError(res);
-      if (!res.ok) throw new Error('Failed to delete regex.');
+      if (!res.ok) throw new Error(await readApiError(res, 'Failed to delete regex.'));
       loadAdminData();
       addToast('Regex rule removed', 'info');
     } catch(e) { setAdminError(e.message); addToast(e.message, 'error'); }
@@ -625,23 +660,47 @@ export default function App() {
     setSettings({ masking_style: val });
     setAdminError('');
     try {
+      const authToken = requireToken();
       const res = await fetch(`${apiUrl}/api/admin/settings`, {
         method: 'PUT',
-        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${authToken}` },
         body: JSON.stringify({ masking_style: val })
       });
-      handleApiError(res);
-      if (!res.ok) throw new Error('Failed to update settings.');
+      if (!res.ok) throw new Error(await readApiError(res, 'Failed to update settings.'));
       addToast(`Masking style updated to ${val}`, 'success');
     } catch(e) { setAdminError(e.message); }
   };
 
   useEffect(() => { if (tab === 'admin') loadAdminData(); }, [tab, loadAdminData]);
 
-  const handleApiError = (res) => {
-    if (res.status === 401) {
-      logout({ logoutParams: { returnTo: window.location.origin } });
-      throw new Error('Session expired. Please log in again.');
+  useEffect(() => {
+    if (authReady && role !== 'admin' && tab === 'admin') {
+      setTab('file');
+      addToast('Admin access requires an admin role.', 'info');
+    }
+  }, [authReady, role, tab, setTab, addToast]);
+
+  const handleExportLogs = async () => {
+    setAdminError('');
+    try {
+      const authToken = requireToken();
+      const res = await fetch(`${apiUrl}/api/admin/logs/export`, {
+        headers: { 'Authorization': `Bearer ${authToken}` }
+      });
+      if (!res.ok) throw new Error(await readApiError(res, 'Failed to export audit logs.'));
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = 'audit_logs.csv';
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      URL.revokeObjectURL(url);
+      addToast('Audit logs exported', 'success');
+    } catch (e) {
+      setAdminError(e.message || 'Failed to export audit logs.');
+      addToast(e.message || 'Failed to export audit logs.', 'error');
     }
   };
 
@@ -677,15 +736,14 @@ export default function App() {
     formData.append('generate_certificate', generateCertificate);
 
     try {
+      const authToken = requireToken();
       const res = await fetch(`${apiUrl}/api/upload`, {
         method: 'POST',
-        headers: { 'Authorization': `Bearer ${token}` },
+        headers: { 'Authorization': `Bearer ${authToken}` },
         body: formData,
       });
-      handleApiError(res);
       if (!res.ok) {
-        const errBody = await res.json().catch(() => ({ detail: res.statusText }));
-        throw new Error(errBody.detail || 'Processing failed.');
+        throw new Error(await readApiError(res, 'Processing failed.'));
       }
       const data = await res.json();
       if (res.status === 202 && data.task_id) {
@@ -709,10 +767,11 @@ export default function App() {
 
   const pollTaskStatus = async (taskId, isCloud = false) => {
     try {
+      const authToken = requireToken();
       const res = await fetch(`${apiUrl}/api/tasks/${taskId}`, {
-        headers: { 'Authorization': `Bearer ${token}` }
+        headers: { 'Authorization': `Bearer ${authToken}` }
       });
-      handleApiError(res);
+      if (!res.ok) throw new Error(await readApiError(res, 'Error checking task status.'));
       const data = await res.json();
 
       if (data.status === 'SUCCESS') {
@@ -741,9 +800,15 @@ export default function App() {
         setTimeout(() => pollTaskStatus(taskId, isCloud), 2000);
       }
     } catch (err) {
-      setError('Error checking task status.');
-      addToast('Error checking task status', 'error');
-      setIsLoading(false);
+      const message = err.message || 'Error checking task status.';
+      if (isCloud) {
+        setCloudError(message);
+        setCloudLoading(false);
+      } else {
+        setError(message);
+        setIsLoading(false);
+      }
+      addToast(message, 'error');
       setTaskMessage('');
     }
   };
@@ -766,13 +831,13 @@ export default function App() {
     setTextError('');
     setTextResult(null);
     try {
+      const authToken = requireToken();
       const res = await fetch(`${apiUrl}/api/mask-text`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${authToken}` },
         body: JSON.stringify({ text: inputText }),
       });
-      handleApiError(res);
-      if (!res.ok) throw new Error('Text analysis failed.');
+      if (!res.ok) throw new Error(await readApiError(res, 'Text analysis failed.'));
       const data = await res.json();
       setTextResult(data);
       addToast(data.pii_found ? `${data.pii_types.length} PII type(s) detected and masked` : 'No PII detected in text', data.pii_found ? 'success' : 'info');
@@ -790,13 +855,14 @@ export default function App() {
     setCloudResult(null);
     setCloudLoading(true);
     try {
+      const authToken = requireToken();
       const res = await fetch(`${apiUrl}/api/cloud-scan`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${authToken}` },
         body: JSON.stringify(cloudForm)
       });
+      if (!res.ok) throw new Error(await readApiError(res, 'Scan failed'));
       const data = await res.json();
-      if (!res.ok) throw new Error(data.detail || 'Scan failed');
       if (res.status === 202 && data.task_id) {
         addToast('Cloud scan started — this may take several minutes', 'info');
         pollTaskStatus(data.task_id, true);
@@ -814,13 +880,13 @@ export default function App() {
   const togglePolicy = async (piiType, currentStatus) => {
     setAdminError('');
     try {
+      const authToken = requireToken();
       const res = await fetch(`${apiUrl}/api/admin/policies`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${authToken}` },
         body: JSON.stringify({ pii_type: piiType, is_active: !currentStatus })
       });
-      handleApiError(res);
-      if (!res.ok) throw new Error('Failed to toggle policy.');
+      if (!res.ok) throw new Error(await readApiError(res, 'Failed to toggle policy.'));
       loadAdminData();
       addToast(`${formatType(piiType)} detection ${!currentStatus ? 'enabled' : 'disabled'}`, 'info');
     } catch(e) { setAdminError(e.message); }
@@ -864,6 +930,32 @@ export default function App() {
               Protected by HIPAA-compliant identity infrastructure
             </p>
           </div>
+        </div>
+      </div>
+    );
+  }
+
+  if (!authReady) {
+    return (
+      <div className="App auth-bg">
+        <div className="bg-pattern" />
+        <div className="auth-loading">
+          <div className="shield-loader-container">
+            <div className="shield-ring" />
+            <div className="shield-ring" />
+            <ShieldAlert size={36} className="shield-icon" />
+          </div>
+          <p className="auth-loading-text">
+            {authError ? 'Account sync failed.' : 'Synchronizing secure account...'}
+          </p>
+          {authError && (
+            <>
+              <div className="alert alert-error"><AlertTriangle size={18} /> {authError}</div>
+              <button className="btn-secondary" onClick={() => logout({ logoutParams: { returnTo: window.location.origin } })}>
+                <LogOut size={14} /> Sign out
+              </button>
+            </>
+          )}
         </div>
       </div>
     );
@@ -1215,7 +1307,7 @@ export default function App() {
               <div className="admin-card">
                 <div className="admin-card-header-flex">
                   <h3><Activity size={20}/> Audit Logs</h3>
-                  <a href={`${apiUrl}/api/admin/logs/export`} className="btn-export" download>Export CSV</a>
+                  <button type="button" className="btn-export" onClick={handleExportLogs}>Export CSV</button>
                 </div>
                 <p className="admin-card-desc">Immutable audit log of all system processing and authentication events.</p>
                 <div className="audit-table-wrap">

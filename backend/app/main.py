@@ -52,6 +52,7 @@ app.add_middleware(
 # -------------------------------------------------------------------
 AWS_REGION = os.getenv("AWS_REGION", "us-east-2")
 S3_BUCKET = os.getenv("S3_BUCKET_NAME", "pii-mask-ocr-files")
+DEFAULT_DLP_ENTITIES = ["PERSON", "EMAIL_ADDRESS", "PHONE_NUMBER", "CREDIT_CARD", "AADHAAR", "PAN_CARD"]
 
 s3_client = boto3.client('s3', region_name=AWS_REGION)
 
@@ -88,6 +89,11 @@ def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(
     user = db.query(models.User).filter(models.User.username == sub).first()
     if user is None:
         raise HTTPException(status_code=401, detail="User not synced. Please call /api/auth/sync first.")
+    if user.org_id is None:
+        org = get_or_create_default_org(db)
+        user.org_id = org.id
+        db.commit()
+        db.refresh(user)
     return user
 
 def require_admin(current_user: models.User = Depends(get_current_user)):
@@ -98,6 +104,15 @@ def require_admin(current_user: models.User = Depends(get_current_user)):
 # -------------------------------------------------------------------
 # Helper: Get active policies & Logging
 # -------------------------------------------------------------------
+def get_or_create_default_org(db: Session):
+    org = db.query(models.Organization).filter(models.Organization.slug == "legacy-org").first()
+    if not org:
+        org = models.Organization(name="Legacy Org", slug="legacy-org", plan="enterprise")
+        db.add(org)
+        db.commit()
+        db.refresh(org)
+    return org
+
 def get_active_entities(db: Session, org_id: Optional[int] = None):
     # If org_id is provided, filter by it. Otherwise fallback (for legacy)
     query = db.query(models.DLPPolicy)
@@ -106,11 +121,10 @@ def get_active_entities(db: Session, org_id: Optional[int] = None):
         
     policies = query.filter(models.DLPPolicy.is_active == True).all()
     if not policies:
-        default = ["PERSON", "EMAIL_ADDRESS", "PHONE_NUMBER", "CREDIT_CARD", "AADHAAR", "PAN_CARD"]
-        for p in default:
+        for p in DEFAULT_DLP_ENTITIES:
             db.add(models.DLPPolicy(pii_type=p, is_active=True, org_id=org_id))
         db.commit()
-        active_entities = default
+        active_entities = DEFAULT_DLP_ENTITIES
     else:
         active_entities = [str(p.pii_type) for p in policies]
         
@@ -209,8 +223,6 @@ def sync_user(request: Request, token: str = Depends(oauth2_scheme), db: Session
                     all_claim_values.append(item.lower())
 
     user_email = payload.get("email", "").lower()
-    user_name = payload.get("name", "").lower()
-    user_nickname = payload.get("nickname", "").lower()
 
     is_admin = False
 
@@ -230,26 +242,21 @@ def sync_user(request: Request, token: str = Depends(oauth2_scheme), db: Session
             if is_admin:
                 break
 
-    # Check 3: Failsafe — match on name/nickname/email containing "vedit"
-    if not is_admin:
-        for claim_val in all_claim_values:
-            if "vedit" in claim_val:
-                is_admin = True
-                print(f"[AUTH SYNC] Admin granted via 'vedit' failsafe in claim: '{claim_val}'")
-                break
-
     # Assign role based on checks above
     correct_role = "admin" if is_admin else "user"
     print(f"[AUTH SYNC] Final role decision: {correct_role} (is_admin={is_admin})")
 
+    org = get_or_create_default_org(db)
+
     if not user:
-        org = db.query(models.Organization).filter(models.Organization.slug == "legacy-org").first()
         # Store Auth0 'sub' in username field. Hashed password is N/A for SSO users.
         user = models.User(username=sub, hashed_password="SSO", role=correct_role, org_id=org.id if org else None)
         db.add(user)
     else:
         # Always re-sync role on every login to enforce Zero-Trust compliance
         user.role = correct_role
+        if user.org_id is None and org:
+            user.org_id = org.id
 
     db.commit()
     db.refresh(user)
@@ -257,7 +264,7 @@ def sync_user(request: Request, token: str = Depends(oauth2_scheme), db: Session
     ip = request.client.host if request.client else "N/A"
     log_audit(db, action="LOGIN", ip=ip, details={"provider": "Auth0", "role_assigned": correct_role, "email_claim": user_email or "NOT_PRESENT"}, user_id=user.id, org_id=user.org_id)
 
-    return {"status": "synced", "role": user.role, "user_id": user.id}
+    return {"status": "synced", "role": user.role, "user_id": user.id, "org_id": user.org_id}
 
 
 @app.post("/api/auth/debug")
@@ -286,13 +293,13 @@ def debug_token(token: str = Depends(oauth2_scheme)):
 # -------------------------------------------------------------------
 @app.get("/api/admin/users")
 def get_users(db: Session = Depends(get_db), current_user: models.User = Depends(require_admin)):
-    users = db.query(models.User).order_by(models.User.id.asc()).all()
+    users = db.query(models.User).filter(models.User.org_id == current_user.org_id).order_by(models.User.id.asc()).all()
     return [{"id": u.id, "username": u.username, "role": u.role} for u in users]
 
 
 @app.get("/api/admin/logs")
 def get_audit_logs(db: Session = Depends(get_db), current_user: models.User = Depends(require_admin)):
-    logs = db.query(models.AuditLog).order_by(models.AuditLog.timestamp.desc()).limit(100).all()
+    logs = db.query(models.AuditLog).filter(models.AuditLog.org_id == current_user.org_id).order_by(models.AuditLog.timestamp.desc()).limit(100).all()
     return [{
         "id": l.id,
         "user_id": l.user.username if l.user else l.user_id, # return auth0 sub
@@ -304,7 +311,8 @@ def get_audit_logs(db: Session = Depends(get_db), current_user: models.User = De
 
 @app.get("/api/admin/policies")
 def get_policies(db: Session = Depends(get_db), current_user: models.User = Depends(require_admin)):
-    return db.query(models.DLPPolicy).all()
+    get_active_entities(db, org_id=current_user.org_id)
+    return db.query(models.DLPPolicy).filter(models.DLPPolicy.org_id == current_user.org_id).order_by(models.DLPPolicy.pii_type.asc()).all()
 
 class PolicyUpdate(BaseModel):
     pii_type: str
@@ -312,19 +320,22 @@ class PolicyUpdate(BaseModel):
 
 @app.post("/api/admin/policies")
 def update_policy(update: PolicyUpdate, db: Session = Depends(get_db), current_user: models.User = Depends(require_admin)):
-    policy = db.query(models.DLPPolicy).filter(models.DLPPolicy.pii_type == update.pii_type).first()
+    policy = db.query(models.DLPPolicy).filter(
+        models.DLPPolicy.org_id == current_user.org_id,
+        models.DLPPolicy.pii_type == update.pii_type
+    ).first()
     if policy:
         policy.is_active = update.is_active
     else:
-        db.add(models.DLPPolicy(pii_type=update.pii_type, is_active=update.is_active))
+        db.add(models.DLPPolicy(pii_type=update.pii_type, is_active=update.is_active, org_id=current_user.org_id))
     db.commit()
     return {"msg": "Policy updated"}
 
 @app.get("/api/admin/settings")
 def get_settings(db: Session = Depends(get_db), current_user: models.User = Depends(require_admin)):
-    settings = db.query(models.SystemSettings).first()
+    settings = db.query(models.SystemSettings).filter(models.SystemSettings.org_id == current_user.org_id).first()
     if not settings:
-        settings = models.SystemSettings(masking_style="LABEL")
+        settings = models.SystemSettings(masking_style="LABEL", org_id=current_user.org_id)
         db.add(settings)
         db.commit()
     return {"masking_style": settings.masking_style}
@@ -334,9 +345,9 @@ class SettingsUpdate(BaseModel):
 
 @app.put("/api/admin/settings")
 def update_settings(update: SettingsUpdate, db: Session = Depends(get_db), current_user: models.User = Depends(require_admin)):
-    settings = db.query(models.SystemSettings).first()
+    settings = db.query(models.SystemSettings).filter(models.SystemSettings.org_id == current_user.org_id).first()
     if not settings:
-        settings = models.SystemSettings(masking_style=update.masking_style)
+        settings = models.SystemSettings(masking_style=update.masking_style, org_id=current_user.org_id)
         db.add(settings)
     else:
         settings.masking_style = update.masking_style
@@ -345,7 +356,7 @@ def update_settings(update: SettingsUpdate, db: Session = Depends(get_db), curre
 
 @app.get("/api/admin/custom-regex")
 def get_custom_regex(db: Session = Depends(get_db), current_user: models.User = Depends(require_admin)):
-    patterns = db.query(models.CustomRegexPolicy).all()
+    patterns = db.query(models.CustomRegexPolicy).filter(models.CustomRegexPolicy.org_id == current_user.org_id).all()
     return [{"id": p.id, "name": p.name, "pattern": p.pattern, "is_active": p.is_active} for p in patterns]
 
 class CustomRegexCreate(BaseModel):
@@ -361,14 +372,17 @@ def create_custom_regex(regex: CustomRegexCreate, db: Session = Depends(get_db),
     except re.error:
         raise HTTPException(status_code=400, detail="Invalid Regex pattern")
     
-    new_regex = models.CustomRegexPolicy(name=regex.name.upper().replace(' ', '_'), pattern=regex.pattern, is_active=regex.is_active)
+    new_regex = models.CustomRegexPolicy(name=regex.name.upper().replace(' ', '_'), pattern=regex.pattern, is_active=regex.is_active, org_id=current_user.org_id)
     db.add(new_regex)
     db.commit()
     return {"msg": "Regex added"}
 
 @app.delete("/api/admin/custom-regex/{regex_id}")
 def delete_custom_regex(regex_id: int, db: Session = Depends(get_db), current_user: models.User = Depends(require_admin)):
-    regex = db.query(models.CustomRegexPolicy).filter(models.CustomRegexPolicy.id == regex_id).first()
+    regex = db.query(models.CustomRegexPolicy).filter(
+        models.CustomRegexPolicy.id == regex_id,
+        models.CustomRegexPolicy.org_id == current_user.org_id
+    ).first()
     if regex:
         db.delete(regex)
         db.commit()
@@ -380,7 +394,7 @@ def export_logs(db: Session = Depends(get_db), current_user: models.User = Depen
     import io
     from fastapi.responses import StreamingResponse
     
-    logs = db.query(models.AuditLog).order_by(models.AuditLog.timestamp.desc()).all()
+    logs = db.query(models.AuditLog).filter(models.AuditLog.org_id == current_user.org_id).order_by(models.AuditLog.timestamp.desc()).all()
     output = io.StringIO()
     writer = csv.writer(output)
     writer.writerow(["ID", "Timestamp", "User ID", "Action", "IP Address", "Details"])
@@ -397,7 +411,7 @@ def export_logs(db: Session = Depends(get_db), current_user: models.User = Depen
 
 @app.get("/api/admin/analytics")
 def get_analytics(db: Session = Depends(get_db), current_user: models.User = Depends(require_admin)):
-    logs = db.query(models.AuditLog).all()
+    logs = db.query(models.AuditLog).filter(models.AuditLog.org_id == current_user.org_id).all()
     entity_counts = {}
     for l in logs:
         if l.details and "detected" in l.details:
@@ -498,7 +512,7 @@ async def mask_text(request: Request, req: TextMaskRequest, current_user: models
     if result["found"]:
         log_audit(db, action="TEXT_MASK", ip=request.client.host if request.client else "N/A", details={
             "detected": result["types"]
-        }, user_id=int(current_user.id), org_id=int(current_user.org_id))  # type: ignore
+        }, user_id=current_user.id, org_id=current_user.org_id)
         
     return {
         "original": req.text,
@@ -518,7 +532,7 @@ class CloudScanRequest(BaseModel):
 
 @app.post("/api/cloud-scan")
 async def cloud_scan_api(request: Request, req: CloudScanRequest, current_user: models.User = Depends(get_current_user), db: Session = Depends(get_db)):
-    active_entities, masking_style, custom_patterns = get_active_entities(db, org_id=int(current_user.org_id))  # type: ignore
+    active_entities, masking_style, custom_patterns = get_active_entities(db, org_id=current_user.org_id)
     
     from backend.app.worker import scan_cloud_bucket_task
     task = scan_cloud_bucket_task.delay(  # type: ignore
@@ -537,7 +551,7 @@ async def cloud_scan_api(request: Request, req: CloudScanRequest, current_user: 
         "provider": req.provider,
         "bucket": req.bucket_name,
         "task_id": task.id
-    }, user_id=int(current_user.id), org_id=int(current_user.org_id))  # type: ignore
+    }, user_id=current_user.id, org_id=current_user.org_id)
     
     return JSONResponse(status_code=202, content={
         "status": "accepted",
