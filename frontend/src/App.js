@@ -553,9 +553,12 @@ export default function App() {
             setAuthReady(true);
             addToast(`Signed in successfully. Role: ${data.role}`, 'success');
           } else {
-            const errData = await res.json().catch(() => ({}));
-            console.error('[AUTH DEBUG] sync FAILED:', res.status, errData);
-            throw new Error(errData.detail || 'Unable to synchronize your account with the server.');
+            const errText = await res.text().catch(() => '');
+            let errData = {};
+            try { errData = errText ? JSON.parse(errText) : {}; } catch (_) { errData = {}; }
+            console.error('[AUTH DEBUG] sync FAILED:', res.status, errData || errText);
+            const fallback = `Account sync failed (${res.status} ${res.statusText || 'HTTP error'}).`;
+            throw new Error(errData.detail || errData.error || errData.message || fallback);
           }
 
           const dbgRes = await fetch(`${apiUrl}/api/auth/debug`, {

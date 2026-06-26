@@ -7,6 +7,7 @@ from fastapi.responses import Response, JSONResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import OAuth2PasswordBearer
 from fastapi.security.api_key import APIKeyHeader
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 import os
 import json
@@ -21,9 +22,30 @@ from botocore.exceptions import NoCredentialsError
 from backend.app import models, database, auth, pii_engine, file_handlers
 from backend.app.database import engine, get_db
 
-try:
+def _add_column_if_missing(conn, table_name: str, column_name: str, postgres_definition: str, sqlite_definition: str):
+    dialect = conn.dialect.name
+    if dialect == "postgresql":
+        conn.execute(text(f"ALTER TABLE {table_name} ADD COLUMN IF NOT EXISTS {column_name} {postgres_definition}"))
+        return
+
+    if dialect == "sqlite":
+        existing = {row[1] for row in conn.execute(text(f"PRAGMA table_info({table_name})")).fetchall()}
+        if column_name not in existing:
+            conn.execute(text(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {sqlite_definition}"))
+
+
+def ensure_database_schema():
+    """Create new tables and patch nullable org columns into older deployed DBs."""
     models.Base.metadata.create_all(bind=engine)
-    # Initialize Default Organization
+    with engine.begin() as conn:
+        _add_column_if_missing(conn, "users", "org_id", "INTEGER REFERENCES organizations(id)", "INTEGER")
+        _add_column_if_missing(conn, "api_keys", "org_id", "INTEGER REFERENCES organizations(id)", "INTEGER")
+        _add_column_if_missing(conn, "dlp_policies", "org_id", "INTEGER REFERENCES organizations(id)", "INTEGER")
+        _add_column_if_missing(conn, "audit_logs", "org_id", "INTEGER REFERENCES organizations(id)", "INTEGER")
+        _add_column_if_missing(conn, "audit_logs", "api_key_id", "VARCHAR REFERENCES api_keys(id)", "VARCHAR")
+        _add_column_if_missing(conn, "custom_regex_policies", "org_id", "INTEGER REFERENCES organizations(id)", "INTEGER")
+        _add_column_if_missing(conn, "system_settings", "org_id", "INTEGER REFERENCES organizations(id)", "INTEGER")
+
     db = database.SessionLocal()
     try:
         default_org = db.query(models.Organization).filter(models.Organization.slug == "legacy-org").first()
@@ -33,6 +55,10 @@ try:
             db.commit()
     finally:
         db.close()
+
+
+try:
+    ensure_database_schema()
 except Exception as e:
     print(f"Database sync warning (safe if concurrent init): {e}")
 
@@ -143,16 +169,20 @@ def get_active_entities(db: Session, org_id: Optional[int] = None):
     return active_entities, masking_style, custom_patterns
 
 def log_audit(db: Session, action: str, ip: str, details: dict, user_id: Optional[int] = None, org_id: Optional[int] = None, api_key_id: Optional[str] = None):
-    log = models.AuditLog(
-        user_id=user_id,
-        org_id=org_id,
-        api_key_id=api_key_id,
-        action=action,
-        ip_address=ip,
-        details=details
-    )
-    db.add(log)
-    db.commit()
+    try:
+        log = models.AuditLog(
+            user_id=user_id,
+            org_id=org_id,
+            api_key_id=api_key_id,
+            action=action,
+            ip_address=ip,
+            details=details
+        )
+        db.add(log)
+        db.commit()
+    except Exception as exc:
+        db.rollback()
+        print(f"Audit log warning for {action}: {exc}")
 # -------------------------------------------------------------------
 # S3 Upload Helper
 # -------------------------------------------------------------------
@@ -198,6 +228,8 @@ def sync_user(request: Request, token: str = Depends(oauth2_scheme), db: Session
     """Called by frontend right after Auth0 login to sync the user to our Postgres DB."""
     payload = auth.verify_auth0_token(token)
     sub = payload.get("sub")
+    if not sub:
+        raise HTTPException(status_code=401, detail="Invalid token: missing sub claim")
 
     # Debug: log every claim Auth0 sent so we can diagnose role issues
     print(f"[AUTH SYNC] sub={sub}")
