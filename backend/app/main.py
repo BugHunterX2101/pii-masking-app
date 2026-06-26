@@ -34,6 +34,18 @@ def _add_column_if_missing(conn, table_name: str, column_name: str, postgres_def
             conn.execute(text(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {sqlite_definition}"))
 
 
+def _drop_legacy_unique_indexes(conn):
+    dialect = conn.dialect.name
+    if dialect == "postgresql":
+        conn.execute(text("ALTER TABLE dlp_policies DROP CONSTRAINT IF EXISTS ix_dlp_policies_pii_type"))
+        conn.execute(text("ALTER TABLE custom_regex_policies DROP CONSTRAINT IF EXISTS ix_custom_regex_policies_name"))
+        conn.execute(text("DROP INDEX IF EXISTS ix_dlp_policies_pii_type"))
+        conn.execute(text("DROP INDEX IF EXISTS ix_custom_regex_policies_name"))
+    elif dialect == "sqlite":
+        conn.execute(text("DROP INDEX IF EXISTS ix_dlp_policies_pii_type"))
+        conn.execute(text("DROP INDEX IF EXISTS ix_custom_regex_policies_name"))
+
+
 def ensure_database_schema():
     """Create new tables and patch nullable org columns into older deployed DBs."""
     models.Base.metadata.create_all(bind=engine)
@@ -45,6 +57,7 @@ def ensure_database_schema():
         _add_column_if_missing(conn, "audit_logs", "api_key_id", "VARCHAR REFERENCES api_keys(id)", "VARCHAR")
         _add_column_if_missing(conn, "custom_regex_policies", "org_id", "INTEGER REFERENCES organizations(id)", "INTEGER")
         _add_column_if_missing(conn, "system_settings", "org_id", "INTEGER REFERENCES organizations(id)", "INTEGER")
+        _drop_legacy_unique_indexes(conn)
 
     db = database.SessionLocal()
     try:
@@ -53,6 +66,11 @@ def ensure_database_schema():
             default_org = models.Organization(name="Legacy Org", slug="legacy-org", plan="enterprise")
             db.add(default_org)
             db.commit()
+            db.refresh(default_org)
+        db.query(models.DLPPolicy).filter(models.DLPPolicy.org_id.is_(None)).update({models.DLPPolicy.org_id: default_org.id}, synchronize_session=False)
+        db.query(models.CustomRegexPolicy).filter(models.CustomRegexPolicy.org_id.is_(None)).update({models.CustomRegexPolicy.org_id: default_org.id}, synchronize_session=False)
+        db.query(models.SystemSettings).filter(models.SystemSettings.org_id.is_(None)).update({models.SystemSettings.org_id: default_org.id}, synchronize_session=False)
+        db.commit()
     finally:
         db.close()
 
@@ -140,32 +158,58 @@ def get_or_create_default_org(db: Session):
     return org
 
 def get_active_entities(db: Session, org_id: Optional[int] = None):
-    # If org_id is provided, filter by it. Otherwise fallback (for legacy)
-    query = db.query(models.DLPPolicy)
-    if org_id is not None:
-        query = query.filter(models.DLPPolicy.org_id == org_id)
-        
-    policies = query.filter(models.DLPPolicy.is_active == True).all()
-    if not policies:
-        for p in DEFAULT_DLP_ENTITIES:
-            db.add(models.DLPPolicy(pii_type=p, is_active=True, org_id=org_id))
-        db.commit()
-        active_entities = DEFAULT_DLP_ENTITIES
-    else:
-        active_entities = [str(p.pii_type) for p in policies]
-        
+    def load_policies():
+        query = db.query(models.DLPPolicy)
+        if org_id is not None:
+            query = query.filter(models.DLPPolicy.org_id == org_id)
+        return query.all()
+
+    policies = load_policies()
+
+    if org_id is not None and not policies:
+        legacy_policies = db.query(models.DLPPolicy).filter(models.DLPPolicy.org_id.is_(None)).all()
+        if legacy_policies:
+            for policy in legacy_policies:
+                policy.org_id = org_id
+            db.commit()
+            policies = legacy_policies
+
+    existing_types = {str(policy.pii_type) for policy in policies}
+    missing_defaults = [entity for entity in DEFAULT_DLP_ENTITIES if entity not in existing_types]
+
+    if missing_defaults:
+        for entity in missing_defaults:
+            policy = None
+            if org_id is not None:
+                policy = db.query(models.DLPPolicy).filter(
+                    models.DLPPolicy.pii_type == entity,
+                    models.DLPPolicy.org_id.is_(None)
+                ).first()
+            if policy:
+                policy.org_id = org_id
+            else:
+                db.add(models.DLPPolicy(pii_type=entity, is_active=True, org_id=org_id))
+        try:
+            db.commit()
+        except Exception as exc:
+            db.rollback()
+            print(f"DLP policy seed warning: {exc}")
+        policies = load_policies()
+
+    active_entities = [str(policy.pii_type) for policy in policies if policy.is_active]
+
     settings_query = db.query(models.SystemSettings)
     if org_id is not None:
         settings_query = settings_query.filter(models.SystemSettings.org_id == org_id)
     settings = settings_query.first()
     masking_style = str(settings.masking_style) if settings else "LABEL"
-    
+
     custom_query = db.query(models.CustomRegexPolicy)
     if org_id is not None:
         custom_query = custom_query.filter(models.CustomRegexPolicy.org_id == org_id)
     custom = custom_query.filter(models.CustomRegexPolicy.is_active == True).all()
     custom_patterns = [{"name": c.name, "pattern": c.pattern} for c in custom]
-    
+
     return active_entities, masking_style, custom_patterns
 
 def log_audit(db: Session, action: str, ip: str, details: dict, user_id: Optional[int] = None, org_id: Optional[int] = None, api_key_id: Optional[str] = None):
@@ -356,6 +400,13 @@ def update_policy(update: PolicyUpdate, db: Session = Depends(get_db), current_u
         models.DLPPolicy.org_id == current_user.org_id,
         models.DLPPolicy.pii_type == update.pii_type
     ).first()
+    if not policy:
+        policy = db.query(models.DLPPolicy).filter(
+            models.DLPPolicy.org_id.is_(None),
+            models.DLPPolicy.pii_type == update.pii_type
+        ).first()
+        if policy:
+            policy.org_id = current_user.org_id
     if policy:
         policy.is_active = update.is_active
     else:
