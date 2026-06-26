@@ -80,7 +80,7 @@ def process_pdf(file_bytes: bytes, active_entities: list[str], detect_raw_fn, cu
 def mask_pii_in_image_gcp(image_bytes: bytes, active_entities: list[str], detect_raw_fn, custom_patterns: Optional[list] = None):
     import cv2
     import numpy as np
-    from google.cloud import vision
+    from google.cloud import vision  # type: ignore[import-untyped]
     import re
     
     # 1. OCR with Google Cloud Vision

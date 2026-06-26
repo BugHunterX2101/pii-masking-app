@@ -1,6 +1,9 @@
 {
   "typeCheckingMode": "basic",
   "reportMissingImports": "none",
+  "reportMissingModuleSource": "none",
+  "reportUnknownVariableType": "none",
+  "reportUnknownMemberType": "none",
   "reportArgumentType": "none",
   "reportAttributeAccessIssue": "none",
   "reportOptionalMemberAccess": "none",
