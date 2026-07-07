@@ -1,13 +1,159 @@
 import React, { useState, useCallback, useRef, useEffect, useLayoutEffect } from 'react';
 import { useAuth0 } from '@auth0/auth0-react';
-import { 
-  Search, Image as ImageIcon, Type, CheckCircle, FileText, Lock, 
-  AlertTriangle, Download, RefreshCw, UploadCloud, ScanLine, 
+import {
+  motion, AnimatePresence, MotionConfig, animate,
+  useReducedMotion, useMotionValue, useSpring, useTransform
+} from 'framer-motion';
+import {
+  Search, Type, CheckCircle, FileText, Lock,
+  AlertTriangle, Download, RefreshCw, UploadCloud, ScanLine,
   ShieldCheck, LogOut, Settings, Activity, ToggleLeft, ToggleRight, User,
-  ShieldAlert, Layers, Cpu, Zap, Database, X, ChevronRight
+  ShieldAlert, Layers, Zap, Database, X, ChevronRight
 } from 'lucide-react';
 import confetti from 'canvas-confetti';
 import './App.css';
+
+/* ============================================================
+   MOTION TOKENS + REUSABLE VARIANTS
+   ============================================================ */
+const EASE = [0.22, 1, 0.36, 1];
+const SPRING = { type: 'spring', stiffness: 420, damping: 30 };
+const SOFT_SPRING = { type: 'spring', stiffness: 260, damping: 24 };
+
+const fadeUp = {
+  hidden: { opacity: 0, y: 18 },
+  show: { opacity: 1, y: 0, transition: { duration: 0.42, ease: EASE } },
+};
+const staggerContainer = {
+  hidden: {},
+  show: { transition: { staggerChildren: 0.07, delayChildren: 0.04 } },
+};
+const scaleIn = {
+  hidden: { opacity: 0, scale: 0.96, y: 12 },
+  show: { opacity: 1, scale: 1, y: 0, transition: SOFT_SPRING },
+};
+const slamIn = {
+  hidden: { opacity: 0, scaleX: 0.4 },
+  show: { opacity: 1, scaleX: 1, transition: SPRING },
+};
+const tabVariants = {
+  initial: { opacity: 0, y: 18, filter: 'blur(6px)' },
+  animate: { opacity: 1, y: 0, filter: 'blur(0px)', transition: { duration: 0.38, ease: EASE } },
+  exit: { opacity: 0, y: -14, filter: 'blur(6px)', transition: { duration: 0.22, ease: 'easeIn' } },
+};
+const hoverTap = { whileHover: { scale: 1.03 }, whileTap: { scale: 0.96 } };
+
+/* ============================================================
+   MOTION HELPERS
+   ============================================================ */
+// Reveal on scroll / mount
+function Reveal({ children, className, variants = fadeUp, amount = 0.2, style }) {
+  return (
+    <motion.div
+      className={className} style={style} variants={variants}
+      initial="hidden" whileInView="show" viewport={{ once: true, amount }}
+    >
+      {children}
+    </motion.div>
+  );
+}
+
+// Magnetic primary button — follows the cursor slightly, springs back
+function Magnetic({ children, className, onClick, disabled, strength = 0.35, style }) {
+  const ref = useRef(null);
+  const x = useMotionValue(0);
+  const y = useMotionValue(0);
+  const sx = useSpring(x, SOFT_SPRING);
+  const sy = useSpring(y, SOFT_SPRING);
+  const onMove = (e) => {
+    if (disabled || !ref.current) return;
+    const r = ref.current.getBoundingClientRect();
+    x.set((e.clientX - (r.left + r.width / 2)) * strength);
+    y.set((e.clientY - (r.top + r.height / 2)) * strength);
+  };
+  const reset = () => { x.set(0); y.set(0); };
+  return (
+    <motion.button
+      ref={ref} type="button" className={className} onClick={onClick} disabled={disabled}
+      style={{ ...style, x: sx, y: sy }} onMouseMove={onMove} onMouseLeave={reset}
+      whileHover={disabled ? undefined : { scale: 1.04 }}
+      whileTap={disabled ? undefined : { scale: 0.96 }}
+    >
+      {children}
+    </motion.button>
+  );
+}
+
+// 3D tilt card
+function TiltCard({ children, className, style }) {
+  const ref = useRef(null);
+  const rx = useMotionValue(0);
+  const ry = useMotionValue(0);
+  const srx = useSpring(rx, { stiffness: 200, damping: 18 });
+  const sry = useSpring(ry, { stiffness: 200, damping: 18 });
+  const onMove = (e) => {
+    if (!ref.current) return;
+    const r = ref.current.getBoundingClientRect();
+    const px = (e.clientX - r.left) / r.width - 0.5;
+    const py = (e.clientY - r.top) / r.height - 0.5;
+    ry.set(px * 12);
+    rx.set(-py * 12);
+  };
+  const reset = () => { rx.set(0); ry.set(0); };
+  return (
+    <motion.div
+      ref={ref} className={className} variants={scaleIn}
+      onMouseMove={onMove} onMouseLeave={reset}
+      whileHover={{ y: -5, boxShadow: '0 16px 40px rgba(0,0,0,0.4)' }}
+      style={{ ...style, rotateX: srx, rotateY: sry, transformPerspective: 800 }}
+    >
+      {children}
+    </motion.div>
+  );
+}
+
+// Count-up number
+function CountUp({ value, format }) {
+  const [display, setDisplay] = useState(0);
+  const reduce = useReducedMotion();
+  useEffect(() => {
+    if (reduce) { setDisplay(value); return; }
+    const controls = animate(0, value, {
+      duration: 1, ease: 'easeOut', onUpdate: (v) => setDisplay(Math.round(v)),
+    });
+    return () => controls.stop();
+  }, [value, reduce]);
+  return <span>{format ? format(display) : display}</span>;
+}
+
+// Parallax ambient orbs (pointer-reactive)
+function AmbientOrbs() {
+  const mx = useMotionValue(0);
+  const my = useMotionValue(0);
+  const x = useSpring(mx, { stiffness: 40, damping: 20 });
+  const y = useSpring(my, { stiffness: 40, damping: 20 });
+  useEffect(() => {
+    const onMove = (e) => {
+      mx.set((e.clientX / window.innerWidth - 0.5) * 44);
+      my.set((e.clientY / window.innerHeight - 0.5) * 44);
+    };
+    window.addEventListener('mousemove', onMove);
+    return () => window.removeEventListener('mousemove', onMove);
+  }, [mx, my]);
+  const x1 = useTransform(x, (v) => v * 1.2);
+  const y1 = useTransform(y, (v) => v * 1.2);
+  const x2 = useTransform(x, (v) => v * -0.9);
+  const y2 = useTransform(y, (v) => v * -0.9);
+  const x3 = useTransform(x, (v) => v * 0.5);
+  const y3 = useTransform(y, (v) => v * 0.5);
+  return (
+    <div className="ambient-orbs" aria-hidden="true">
+      <motion.div className="orb orb-1" style={{ x: x1, y: y1 }} />
+      <motion.div className="orb orb-2" style={{ x: x2, y: y2 }} />
+      <motion.div className="orb orb-3" style={{ x: x3, y: y3 }} />
+    </div>
+  );
+}
 
 /* ============================================================
    UTILITY HELPERS
@@ -48,19 +194,19 @@ function useToast() {
 function ToastContainer({ toasts, removeToast }) {
   return (
     <div className="toast-container">
-      {toasts.map(t => (
-        <Toast key={t.id} toast={t} onRemove={removeToast} />
-      ))}
+      <AnimatePresence>
+        {toasts.map(t => (
+          <Toast key={t.id} toast={t} onRemove={removeToast} />
+        ))}
+      </AnimatePresence>
     </div>
   );
 }
 
 function Toast({ toast, onRemove }) {
-  const [visible, setVisible] = useState(false);
   const [width, setWidth] = useState(100);
 
   useEffect(() => {
-    requestAnimationFrame(() => setVisible(true));
     const step = 100 / (toast.duration / 50);
     const interval = setInterval(() => {
       setWidth(w => {
@@ -74,12 +220,19 @@ function Toast({ toast, onRemove }) {
   const icons = { success: <CheckCircle size={16} />, error: <AlertTriangle size={16} />, info: <ShieldCheck size={16} /> };
 
   return (
-    <div className={`toast toast-${toast.type} ${visible ? 'toast-visible' : ''}`}>
+    <motion.div
+      layout
+      className={`toast toast-${toast.type}`}
+      initial={{ opacity: 0, x: 44, scale: 0.9 }}
+      animate={{ opacity: 1, x: 0, scale: 1 }}
+      exit={{ opacity: 0, x: 44, scale: 0.9, transition: { duration: 0.18 } }}
+      transition={SOFT_SPRING}
+    >
       <div className="toast-icon">{icons[toast.type] || icons.info}</div>
       <span className="toast-message">{toast.message}</span>
       <button className="toast-close" onClick={() => onRemove(toast.id)}><X size={14} /></button>
       <div className="toast-progress" style={{ width: `${width}%` }} />
-    </div>
+    </motion.div>
   );
 }
 
@@ -106,41 +259,57 @@ function CommandPalette({ isOpen, onClose, onNavigate }) {
     if (isOpen) { setQuery(''); setTimeout(() => inputRef.current?.focus(), 50); }
   }, [isOpen]);
 
-  if (!isOpen) return null;
-
   return (
-    <div className="palette-backdrop" onClick={onClose}>
-      <div className="palette-modal" onClick={e => e.stopPropagation()}>
-        <div className="palette-search-row">
-          <Search size={18} className="palette-search-icon" />
-          <input
-            ref={inputRef}
-            className="palette-input"
-            placeholder="Type a command..."
-            value={query}
-            onChange={e => setQuery(e.target.value)}
-            onKeyDown={e => {
-              if (e.key === 'Escape') onClose();
-              if (e.key === 'Enter' && filtered.length > 0) { onNavigate(filtered[0].tab); onClose(); }
-            }}
-          />
-          <kbd className="palette-esc">Esc</kbd>
-        </div>
-        <div className="palette-list">
-          {filtered.map(cmd => (
-            <button key={cmd.id} className="palette-item" onClick={() => { onNavigate(cmd.tab); onClose(); }}>
-              <span className="palette-item-icon">{cmd.icon}</span>
-              <span className="palette-item-label">{cmd.label}</span>
-              {cmd.shortcut && <kbd className="palette-item-shortcut">{cmd.shortcut}</kbd>}
-              <ChevronRight size={14} className="palette-item-arrow" />
-            </button>
-          ))}
-          {filtered.length === 0 && (
-            <div className="palette-empty">No commands found</div>
-          )}
-        </div>
-      </div>
-    </div>
+    <AnimatePresence>
+      {isOpen && (
+        <motion.div
+          className="palette-backdrop" onClick={onClose}
+          initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
+          transition={{ duration: 0.15 }}
+        >
+          <motion.div
+            className="palette-modal" onClick={e => e.stopPropagation()}
+            initial={{ opacity: 0, scale: 0.94, y: -14 }}
+            animate={{ opacity: 1, scale: 1, y: 0 }}
+            exit={{ opacity: 0, scale: 0.96, y: -8, transition: { duration: 0.14 } }}
+            transition={SOFT_SPRING}
+          >
+            <div className="palette-search-row">
+              <Search size={18} className="palette-search-icon" />
+              <input
+                ref={inputRef}
+                className="palette-input"
+                placeholder="Type a command..."
+                value={query}
+                onChange={e => setQuery(e.target.value)}
+                onKeyDown={e => {
+                  if (e.key === 'Escape') onClose();
+                  if (e.key === 'Enter' && filtered.length > 0) { onNavigate(filtered[0].tab); onClose(); }
+                }}
+              />
+              <kbd className="palette-esc">Esc</kbd>
+            </div>
+            <motion.div className="palette-list" variants={staggerContainer} initial="hidden" animate="show">
+              {filtered.map(cmd => (
+                <motion.button
+                  key={cmd.id} className="palette-item" variants={fadeUp}
+                  whileHover={{ x: 4 }}
+                  onClick={() => { onNavigate(cmd.tab); onClose(); }}
+                >
+                  <span className="palette-item-icon">{cmd.icon}</span>
+                  <span className="palette-item-label">{cmd.label}</span>
+                  {cmd.shortcut && <kbd className="palette-item-shortcut">{cmd.shortcut}</kbd>}
+                  <ChevronRight size={14} className="palette-item-arrow" />
+                </motion.button>
+              ))}
+              {filtered.length === 0 && (
+                <div className="palette-empty">No commands found</div>
+              )}
+            </motion.div>
+          </motion.div>
+        </motion.div>
+      )}
+    </AnimatePresence>
   );
 }
 
@@ -345,38 +514,23 @@ function LiveHeatmap({ text }) {
 function MaskedText({ text }) {
   const parts = text.split(/(\[[A-Z0-9_]+_MASKED\])/g);
   return (
-    <>
+    <motion.span variants={staggerContainer} initial="hidden" animate="show" style={{ display: 'inline' }}>
       {parts.map((part, i) => {
         const match = part.match(/^\[([A-Z0-9_]+)_MASKED\]$/);
         if (match) {
           return (
-            <span key={i} className="redaction-bar" title={`Redacted: ${formatType(match[1])}`}>
-              {Array.from({ length: Math.max(4, match[1].length) }, () => '\u2588').join('')}
-            </span>
+            <motion.span
+              key={i} variants={slamIn} className="redaction-bar"
+              title={`Redacted: ${formatType(match[1])}`} style={{ display: 'inline-block' }}
+            >
+              {Array.from({ length: Math.max(4, match[1].length) }, () => '█').join('')}
+            </motion.span>
           );
         }
         return <span key={i}>{part}</span>;
       })}
-    </>
+    </motion.span>
   );
-}
-
-/* ============================================================
-   ODOMETER COUNT
-   ============================================================ */
-function OdometerCount({ endCount }) {
-  const [count, setCount] = useState(0);
-  useEffect(() => {
-    let start = 0;
-    const duration = 1000;
-    const stepTime = Math.abs(Math.floor(duration / (endCount || 1)));
-    const timer = setInterval(() => {
-      start += 1;
-      if (start > endCount) { clearInterval(timer); } else { setCount(start); }
-    }, stepTime);
-    return () => clearInterval(timer);
-  }, [endCount]);
-  return <span className="report-count">{count} item{count !== 1 ? 's' : ''} found</span>;
 }
 
 /* ============================================================
@@ -385,31 +539,38 @@ function OdometerCount({ endCount }) {
 function DetectionReport({ report }) {
   if (!report) return null;
   return (
-    <div className="report-section">
+    <motion.div
+      className="report-section"
+      initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.4, ease: EASE }}
+    >
       <div className="report-header">
         <h3><Search size={18} /> Detection Report</h3>
-        <OdometerCount endCount={report.length} />
+        <span className="report-count">
+          <CountUp value={report.length} /> item{report.length !== 1 ? 's' : ''} found
+        </span>
       </div>
       <div className="report-body">
         {report.length === 0 ? (
           <p className="report-empty">No PII detected in this document.</p>
         ) : (
-          report.map((item, i) => (
-            <div className="report-item" key={i} style={{ animationDelay: `${i * 60}ms` }}>
-              <span className="report-item-num">{i + 1}</span>
-              <div className="report-item-content">
-                <p className="report-item-text">{item.text}</p>
-                <div className="report-tags">
-                  {item.pii_types.map(t => (
-                    <span key={t} className="report-tag tag-default">{formatType(t)}</span>
-                  ))}
+          <motion.div variants={staggerContainer} initial="hidden" animate="show">
+            {report.map((item, i) => (
+              <motion.div className="report-item" key={i} variants={fadeUp}>
+                <span className="report-item-num">{i + 1}</span>
+                <div className="report-item-content">
+                  <p className="report-item-text">{item.text}</p>
+                  <motion.div className="report-tags" variants={staggerContainer} initial="hidden" animate="show">
+                    {item.pii_types.map(t => (
+                      <motion.span key={t} className="report-tag tag-default" variants={scaleIn}>{formatType(t)}</motion.span>
+                    ))}
+                  </motion.div>
                 </div>
-              </div>
-            </div>
-          ))
+              </motion.div>
+            ))}
+          </motion.div>
         )}
       </div>
-    </div>
+    </motion.div>
   );
 }
 
@@ -723,7 +884,7 @@ export default function App() {
   }, []);
 
   const triggerConfetti = () => {
-    confetti({ particleCount: 120, spread: 80, origin: { y: 0.6 }, colors: ['#06B6D4', '#3B82F6', '#10B981', '#FFFFFF'] });
+    confetti({ particleCount: 120, spread: 80, origin: { y: 0.6 }, colors: ['#06B6D4', '#3B82F6', '#22C55E', '#FFFFFF'] });
   };
 
   const handleProcess = async () => {
@@ -897,526 +1058,588 @@ export default function App() {
 
   if (authLoading) {
     return (
-      <div className="App auth-bg">
-        <div className="bg-pattern" />
-        <div className="auth-loading">
-          <div className="shield-loader-container">
-            <div className="shield-ring" />
-            <div className="shield-ring" />
-            <ShieldAlert size={36} className="shield-icon" />
-          </div>
-          <p className="auth-loading-text">Establishing secure session...</p>
+      <MotionConfig reducedMotion="user">
+        <div className="App auth-bg">
+          <div className="bg-pattern" />
+          <div className="scanlines" />
+          <motion.div className="auth-loading" initial={{ opacity: 0 }} animate={{ opacity: 1 }}>
+            <div className="shield-loader-container">
+              <div className="shield-ring" />
+              <div className="shield-ring" />
+              <ShieldAlert size={36} className="shield-icon" />
+            </div>
+            <p className="auth-loading-text">Establishing secure session...</p>
+          </motion.div>
         </div>
-      </div>
+      </MotionConfig>
     );
   }
 
   if (!isAuthenticated) {
     return (
-      <div className="App auth-bg">
-        <div className="bg-pattern" />
-        <HeroCanvas />
-        <div className="auth-container">
-          <div className="auth-card">
-            <div className="auth-header">
-              <div className="auth-shield-wrap">
-                <ShieldCheck size={40} className="auth-icon" />
-              </div>
-              <h2>Enterprise Privacy Suite</h2>
-              <p>Secure access via corporate SSO. All sessions are encrypted and audited.</p>
-            </div>
-            <button className="btn-primary auth-submit" onClick={() => loginWithRedirect()}>
-              <Lock size={16} />
-              Sign in with Auth0
-            </button>
-            <p className="auth-footnote">
-              Protected by HIPAA-compliant identity infrastructure
-            </p>
+      <MotionConfig reducedMotion="user">
+        <div className="App auth-bg">
+          <div className="bg-pattern" />
+          <HeroCanvas />
+          <div className="scanlines" />
+          <div className="auth-container">
+            <motion.div
+              className="auth-card hud-frame"
+              initial={{ opacity: 0, scale: 0.92, y: 24 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              transition={{ ...SOFT_SPRING, delay: 0.1 }}
+            >
+              <motion.div
+                className="auth-header"
+                variants={staggerContainer} initial="hidden" animate="show"
+              >
+                <motion.div className="auth-shield-wrap" variants={scaleIn}
+                  animate={{ y: [0, -6, 0] }}
+                  transition={{ y: { repeat: Infinity, duration: 3.5, ease: 'easeInOut' } }}
+                >
+                  <ShieldCheck size={40} className="auth-icon" />
+                </motion.div>
+                <motion.h2 variants={fadeUp}>Enterprise Privacy Suite</motion.h2>
+                <motion.p variants={fadeUp}>Secure access via corporate SSO. All sessions are encrypted and audited.</motion.p>
+              </motion.div>
+              <Magnetic className="btn-primary auth-submit" onClick={() => loginWithRedirect()}>
+                <Lock size={16} />
+                Sign in with Auth0
+              </Magnetic>
+              <p className="auth-footnote">
+                Protected by HIPAA-compliant identity infrastructure
+              </p>
+            </motion.div>
           </div>
         </div>
-      </div>
+      </MotionConfig>
     );
   }
 
   if (!authReady) {
     return (
-      <div className="App auth-bg">
-        <div className="bg-pattern" />
-        <div className="auth-loading">
-          <div className="shield-loader-container">
-            <div className="shield-ring" />
-            <div className="shield-ring" />
-            <ShieldAlert size={36} className="shield-icon" />
-          </div>
-          <p className="auth-loading-text">
-            {authError ? 'Account sync failed.' : 'Synchronizing secure account...'}
-          </p>
-          {authError && (
-            <>
-              <div className="alert alert-error"><AlertTriangle size={18} /> {authError}</div>
-              <button className="btn-secondary" onClick={() => logout({ logoutParams: { returnTo: window.location.origin } })}>
-                <LogOut size={14} /> Sign out
-              </button>
-            </>
-          )}
+      <MotionConfig reducedMotion="user">
+        <div className="App auth-bg">
+          <div className="bg-pattern" />
+          <div className="scanlines" />
+          <motion.div className="auth-loading" initial={{ opacity: 0 }} animate={{ opacity: 1 }}>
+            <div className="shield-loader-container">
+              <div className="shield-ring" />
+              <div className="shield-ring" />
+              <ShieldAlert size={36} className="shield-icon" />
+            </div>
+            <p className="auth-loading-text">
+              {authError ? 'Account sync failed.' : 'Synchronizing secure account...'}
+            </p>
+            {authError && (
+              <>
+                <div className="alert alert-error"><AlertTriangle size={18} /> {authError}</div>
+                <motion.button {...hoverTap} className="btn-secondary" onClick={() => logout({ logoutParams: { returnTo: window.location.origin } })}>
+                  <LogOut size={14} /> Sign out
+                </motion.button>
+              </>
+            )}
+          </motion.div>
         </div>
-      </div>
+      </MotionConfig>
     );
   }
 
+  const tabs = [
+    { id: 'file',  label: 'Document',     icon: <FileText size={16} /> },
+    { id: 'text',  label: 'Text Scanner', icon: <Type size={16} /> },
+    { id: 'cloud', label: 'Cloud Scan',   icon: <Database size={16} /> },
+    ...(role === 'admin' ? [{ id: 'admin', label: 'Admin', icon: <Settings size={16} /> }] : []),
+  ];
+
   return (
+    <MotionConfig reducedMotion="user">
     <div className="App">
       <div className="bg-pattern" />
+      <AmbientOrbs />
+      <div className="scanlines" />
 
       <CommandPalette isOpen={paletteOpen} onClose={() => setPaletteOpen(false)} onNavigate={setTab} />
 
       {/* Session Activity Sidebar */}
-      <aside className="stats-sidebar">
+      <motion.aside
+        className="stats-sidebar hud-frame"
+        initial={{ opacity: 0, x: -30 }} animate={{ opacity: 1, x: 0 }}
+        transition={{ ...SOFT_SPRING, delay: 0.3 }}
+      >
         <div className="sidebar-title"><Activity size={14} style={{display:'inline', marginBottom:'-2px', marginRight:'4px'}}/> Session Activity</div>
         <div className="stat-item">
           <span className="stat-label">Documents Processed</span>
-          <span className="stat-value">{stats.docs}</span>
+          <motion.span key={stats.docs} className="stat-value" initial={{ scale: 1.4, color: '#06B6D4' }} animate={{ scale: 1, color: '#F1F5F9' }} transition={SPRING}>{stats.docs}</motion.span>
         </div>
         <div className="stat-item">
           <span className="stat-label">PII Items Redacted</span>
-          <span className="stat-value highlight">{stats.pii}</span>
+          <motion.span key={stats.pii} className="stat-value highlight" initial={{ scale: 1.4 }} animate={{ scale: 1 }} transition={SPRING}>{stats.pii}</motion.span>
         </div>
         <div className="sidebar-divider" />
-        <button className="sidebar-palette-btn" onClick={() => setPaletteOpen(true)}>
+        <motion.button {...hoverTap} className="sidebar-palette-btn" onClick={() => setPaletteOpen(true)}>
           <Search size={13} />
           <span>Quick commands</span>
           <kbd>Ctrl K</kbd>
-        </button>
-      </aside>
+        </motion.button>
+      </motion.aside>
 
       <header className="App-header">
         <div className="header-top-right">
-          <button className="palette-trigger" onClick={() => setPaletteOpen(true)} title="Open command palette (Ctrl+K)">
+          <motion.button {...hoverTap} className="palette-trigger" onClick={() => setPaletteOpen(true)} title="Open command palette (Ctrl+K)">
             <Search size={14} />
             <span>Ctrl K</span>
-          </button>
+          </motion.button>
           <span className="header-user">
             {user?.picture && <img src={user.picture} alt="Avatar" className="header-avatar" />}
             <span className="header-username">{user?.name}</span>
           </span>
           <span className="role-pill role-pill-header">{role}</span>
-          <button className="btn-logout" onClick={() => logout({ logoutParams: { returnTo: window.location.origin } })}>
+          <motion.button {...hoverTap} className="btn-logout" onClick={() => logout({ logoutParams: { returnTo: window.location.origin } })}>
             <LogOut size={14} /> Sign out
-          </button>
+          </motion.button>
         </div>
 
-        <div className="header-inner">
-          <div className="header-badge"><span className="header-badge-dot" /> Enterprise Edition</div>
-          <h1>Mask <em>Sensitive</em> Information</h1>
-          <p>AI-powered PII detection and redaction across documents, text, and cloud storage — with full compliance audit trails.</p>
-        </div>
+        <motion.div className="header-inner" variants={staggerContainer} initial="hidden" animate="show">
+          <motion.div className="header-badge" variants={fadeUp}><span className="header-badge-dot" /> Enterprise Edition</motion.div>
+          <motion.h1 variants={staggerContainer}>
+            <motion.span className="hero-word" variants={fadeUp}>Mask&nbsp;</motion.span>
+            <motion.em className="hero-word" variants={fadeUp}>Sensitive&nbsp;</motion.em>
+            <motion.span className="hero-word" variants={fadeUp}>Information</motion.span>
+          </motion.h1>
+          <motion.p variants={fadeUp}>AI-powered PII detection and redaction across documents, text, and cloud storage — with full compliance audit trails.</motion.p>
+        </motion.div>
       </header>
 
-      <div className="micro-status-bar">
-        <div className="status-indicator"><div className="status-dot online" />Auth0 Connected</div>
-        <div className="status-indicator"><div className="status-dot online" />Redis Queue Ready</div>
-        <div className="status-indicator"><div className="status-dot online" />GCP Vision Active</div>
-      </div>
+      <motion.div className="micro-status-bar" variants={staggerContainer} initial="hidden" animate="show">
+        {['Auth0 Connected', 'Redis Queue Ready', 'GCP Vision Active'].map(label => (
+          <motion.div key={label} className="status-indicator" variants={fadeUp}><div className="status-dot online" />{label}</motion.div>
+        ))}
+      </motion.div>
 
       <main className="App-main">
         {/* Feature Cards */}
-        <div className="stat-cards-container">
+        <motion.div
+          className="stat-cards-container"
+          variants={staggerContainer} initial="hidden" whileInView="show" viewport={{ once: true, amount: 0.3 }}
+        >
           {[
-            { icon: <Layers size={20} />, title: 'Supported Formats', sub: 'PDF · DOCX · IMG · CSV · JSONL', delay: '0ms' },
-            { icon: <Search size={20} />, title: 'Detection Engine', sub: 'Presidio + GCP Vision OCR', delay: '80ms' },
-            { icon: <Zap size={20} />, title: 'Async Processing', sub: 'Celery + Redis Worker Queue', delay: '160ms' },
+            { icon: <Layers size={20} />, title: 'Supported Formats', sub: 'PDF · DOCX · IMG · CSV · JSONL' },
+            { icon: <Search size={20} />, title: 'Detection Engine', sub: 'Presidio + GCP Vision OCR' },
+            { icon: <Zap size={20} />, title: 'Async Processing', sub: 'Celery + Redis Worker Queue' },
           ].map((c, i) => (
-            <div key={i} className="glass-stat-card" style={{ animationDelay: c.delay }}>
+            <TiltCard key={i} className="glass-stat-card">
               <div className="stat-icon-wrap">{c.icon}</div>
               <div className="stat-card-content">
                 <h4>{c.title}</h4>
                 <p>{c.sub}</p>
               </div>
-            </div>
+            </TiltCard>
           ))}
-        </div>
+        </motion.div>
 
         {/* Tab Navigation */}
         <div className="tab-nav">
-          <button className={`tab-btn${tab === 'file'  ? ' active' : ''}`} onClick={() => setTab('file')}><FileText size={16} /> Document</button>
-          <button className={`tab-btn${tab === 'text'  ? ' active' : ''}`} onClick={() => setTab('text')}><Type size={16} /> Text Scanner</button>
-          <button className={`tab-btn${tab === 'cloud' ? ' active' : ''}`} onClick={() => setTab('cloud')}><Database size={16} /> Cloud Scan</button>
-          {role === 'admin' && (
-            <button className={`tab-btn${tab === 'admin' ? ' active' : ''}`} onClick={() => setTab('admin')}><Settings size={16} /> Admin</button>
-          )}
+          {tabs.map(t => (
+            <button key={t.id} className={`tab-btn${tab === t.id ? ' active' : ''}`} onClick={() => setTab(t.id)}>
+              {tab === t.id && <motion.span className="tab-pill" layoutId="tab-pill" transition={SPRING} />}
+              <span className="tab-btn-inner">{t.icon} {t.label}</span>
+            </button>
+          ))}
         </div>
 
-        {/* TAB: File Upload */}
-        {tab === 'file' && (
-          <div key={`file-${tabKey}`} className="tab-content upload-section">
-            {!processedUrl && !isLoading && (
-              <div
-                className={`drop-zone ${dragOver ? 'drag-over' : ''} ${file ? 'has-file' : ''}`}
-                onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
-                onDragLeave={() => setDragOver(false)}
-                onDrop={(e) => {
-                  e.preventDefault(); setDragOver(false);
-                  if (e.dataTransfer.files && e.dataTransfer.files.length > 0) handleFileSelect(e.dataTransfer.files[0]);
-                }}
-                onClick={() => { if (!file) fileInputRef.current?.click(); }}
-              >
-                <div className="scan-line" />
-                {file ? (
-                  <>
-                    <CheckCircle className="drop-icon" size={48} style={{ color: 'var(--success)' }} />
-                    <h3 className="drop-title">Ready to process</h3>
-                    <p className="drop-sub">Click Mask Document to detect and redact all PII.</p>
-                    <div className="file-info"><FileText size={16}/> {file.name}</div>
-                  </>
-                ) : (
-                  <>
-                    <UploadCloud className="drop-icon" size={48} />
-                    <h3 className="drop-title">Drag and drop document or ZIP archive</h3>
-                    <p className="drop-sub">Supports PDF, DOCX, JPG, PNG, WEBP, CSV, JSONL and batch ZIP</p>
-                    <span className="drop-browse">or click to browse files</span>
-                  </>
+        <AnimatePresence mode="wait">
+          <motion.div
+            key={`${tab}-${tabKey}`}
+            variants={tabVariants} initial="initial" animate="animate" exit="exit"
+          >
+            {/* TAB: File Upload */}
+            {tab === 'file' && (
+              <div className="tab-content upload-section">
+                {!processedUrl && !isLoading && (
+                  <motion.div
+                    className={`drop-zone ${dragOver ? 'drag-over' : ''} ${file ? 'has-file' : ''}`}
+                    whileHover={{ scale: 1.005 }}
+                    animate={dragOver ? { scale: 1.012 } : { scale: 1 }}
+                    transition={SPRING}
+                    onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
+                    onDragLeave={() => setDragOver(false)}
+                    onDrop={(e) => {
+                      e.preventDefault(); setDragOver(false);
+                      if (e.dataTransfer.files && e.dataTransfer.files.length > 0) handleFileSelect(e.dataTransfer.files[0]);
+                    }}
+                    onClick={() => { if (!file) fileInputRef.current?.click(); }}
+                  >
+                    <div className="scan-line" />
+                    <AnimatePresence mode="wait">
+                      {file ? (
+                        <motion.div key="ready" initial={{ opacity: 0, scale: 0.9 }} animate={{ opacity: 1, scale: 1 }} exit={{ opacity: 0 }} transition={SPRING}>
+                          <motion.div initial={{ scale: 0, rotate: -30 }} animate={{ scale: 1, rotate: 0 }} transition={{ ...SPRING, delay: 0.05 }}>
+                            <CheckCircle className="drop-icon" size={48} style={{ color: 'var(--safe)' }} />
+                          </motion.div>
+                          <h3 className="drop-title">Ready to process</h3>
+                          <p className="drop-sub">Click Mask Document to detect and redact all PII.</p>
+                          <div className="file-info"><FileText size={16}/> {file.name}</div>
+                        </motion.div>
+                      ) : (
+                        <motion.div key="empty" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}>
+                          <motion.div animate={{ y: [0, -8, 0] }} transition={{ repeat: Infinity, duration: 3, ease: 'easeInOut' }} style={{ display: 'inline-block' }}>
+                            <UploadCloud className="drop-icon" size={48} />
+                          </motion.div>
+                          <h3 className="drop-title">Drag and drop document or ZIP archive</h3>
+                          <p className="drop-sub">Supports PDF, DOCX, JPG, PNG, WEBP, CSV, JSONL and batch ZIP</p>
+                          <span className="drop-browse">or click to browse files</span>
+                        </motion.div>
+                      )}
+                    </AnimatePresence>
+                    <input type="file" ref={fileInputRef} className="file-input-hidden"
+                      onChange={(e) => handleFileSelect(e.target.files[0])}
+                      accept=".pdf,.docx,.jpg,.jpeg,.png,.webp,.zip,.csv,.jsonl" />
+                  </motion.div>
                 )}
-                <input type="file" ref={fileInputRef} className="file-input-hidden"
-                  onChange={(e) => handleFileSelect(e.target.files[0])}
-                  accept=".pdf,.docx,.jpg,.jpeg,.png,.webp,.zip,.csv,.jsonl" />
-              </div>
-            )}
 
-            {error && <div className="alert alert-error"><AlertTriangle size={18} /> {error}</div>}
+                {error && <motion.div className="alert alert-error" initial={{ opacity: 0, y: -8 }} animate={{ opacity: 1, y: 0 }}><AlertTriangle size={18} /> {error}</motion.div>}
 
-            {isLoading && (
-              <div className="loading-state">
-                <div className="shield-loader-container">
-                  <div className="shield-ring" />
-                  <div className="shield-ring" />
-                  <ShieldAlert size={36} className="shield-icon" />
-                </div>
-                <p className="loading-label">{taskMessage || 'Initializing AI Engine...'}</p>
-                <div className="loading-progress-track">
-                  <div className="loading-progress-bar" />
-                </div>
-              </div>
-            )}
+                {isLoading && (
+                  <motion.div className="loading-state" initial={{ opacity: 0, scale: 0.96 }} animate={{ opacity: 1, scale: 1 }}>
+                    <div className="shield-loader-container">
+                      <div className="shield-ring" />
+                      <div className="shield-ring" />
+                      <ShieldAlert size={36} className="shield-icon" />
+                    </div>
+                    <p className="loading-label">{taskMessage || 'Initializing AI Engine...'}</p>
+                    <div className="loading-progress-track">
+                      <div className="loading-progress-bar" />
+                    </div>
+                  </motion.div>
+                )}
 
-            {!isLoading && file && !processedUrl && (
-              <div className="btn-row" style={{ flexDirection: 'column', alignItems: 'center', gap: '16px' }}>
-                <label className="cert-checkbox-label">
-                  <input type="checkbox" checked={generateCertificate} onChange={e => setGenerateCertificate(e.target.checked)} />
-                  <span>Generate HIPAA Compliance Certificate (PDF/DOCX only)</span>
-                </label>
-                <div className="btn-row">
-                  <button className="btn-secondary" onClick={handleReset}><RefreshCw size={16}/> Clear</button>
-                  <button className="btn-primary" onClick={handleProcess}><Lock size={16}/> Mask Document</button>
-                </div>
-              </div>
-            )}
-
-            {processedUrl && !isLoading && (
-              <div className="result-section">
-                {showSuccess && (
-                  <div className="success-banner">
-                    <SuccessCheck />
-                    <div>
-                      <strong>Document sanitized successfully</strong>
-                      <p>{report?.length || 0} PII items identified and redacted.</p>
+                {!isLoading && file && !processedUrl && (
+                  <div className="btn-row" style={{ flexDirection: 'column', alignItems: 'center', gap: '16px' }}>
+                    <label className="cert-checkbox-label">
+                      <input type="checkbox" checked={generateCertificate} onChange={e => setGenerateCertificate(e.target.checked)} />
+                      <span>Generate HIPAA Compliance Certificate (PDF/DOCX only)</span>
+                    </label>
+                    <div className="btn-row">
+                      <motion.button {...hoverTap} className="btn-secondary" onClick={handleReset}><RefreshCw size={16}/> Clear</motion.button>
+                      <Magnetic className="btn-primary" onClick={handleProcess}><Lock size={16}/> Mask Document</Magnetic>
                     </div>
                   </div>
                 )}
-                {file && file.type.startsWith('image/') ? (
-                  <div className="image-card">
-                    <div className="image-card-header">
-                      <span className="image-card-title"><span className="image-card-title-dot dot-processed"/> Before and After</span>
-                      <a href={processedUrl} download className="btn-download"><Download size={16} /> Download Masked</a>
-                    </div>
-                    <div className="image-card-body" style={{ padding: 0 }}>
-                      <ImageReveal original={originalPreview} masked={processedUrl} />
-                    </div>
-                  </div>
-                ) : (
-                  <div className="image-card">
-                    <div className="image-card-header">
-                      <span className="image-card-title"><span className="image-card-title-dot dot-processed"/> Secure Document Ready</span>
-                      <div style={{ display: 'flex', gap: '12px' }}>
-                        {certificateUrl && (
-                          <a href={certificateUrl} download className="btn-secondary"><ShieldCheck size={16} /> Certificate</a>
-                        )}
-                        <a href={processedUrl} download className="btn-download"><Download size={16} /> Download File</a>
-                      </div>
+
+                {processedUrl && !isLoading && (
+                  <div className="result-section">
+                    {showSuccess && (
+                      <motion.div className="success-banner" initial={{ opacity: 0, scale: 0.95 }} animate={{ opacity: 1, scale: 1 }} transition={SOFT_SPRING}>
+                        <SuccessCheck />
+                        <div>
+                          <strong>Document sanitized successfully</strong>
+                          <p>{report?.length || 0} PII items identified and redacted.</p>
+                        </div>
+                      </motion.div>
+                    )}
+                    {file && file.type.startsWith('image/') ? (
+                      <motion.div className="image-card" initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.4, ease: EASE }}>
+                        <div className="image-card-header">
+                          <span className="image-card-title"><span className="image-card-title-dot dot-processed"/> Before and After</span>
+                          <motion.a {...hoverTap} href={processedUrl} download className="btn-download"><Download size={16} /> Download Masked</motion.a>
+                        </div>
+                        <div className="image-card-body" style={{ padding: 0 }}>
+                          <ImageReveal original={originalPreview} masked={processedUrl} />
+                        </div>
+                      </motion.div>
+                    ) : (
+                      <motion.div className="image-card" initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.4, ease: EASE }}>
+                        <div className="image-card-header">
+                          <span className="image-card-title"><span className="image-card-title-dot dot-processed"/> Secure Document Ready</span>
+                          <div style={{ display: 'flex', gap: '12px' }}>
+                            {certificateUrl && (
+                              <motion.a {...hoverTap} href={certificateUrl} download className="btn-secondary"><ShieldCheck size={16} /> Certificate</motion.a>
+                            )}
+                            <motion.a {...hoverTap} href={processedUrl} download className="btn-download"><Download size={16} /> Download File</motion.a>
+                          </div>
+                        </div>
+                      </motion.div>
+                    )}
+                    <DetectionReport report={report} />
+                    <div className="btn-row" style={{ marginTop: '32px' }}>
+                      <motion.button {...hoverTap} className="btn-secondary" onClick={handleReset}><RefreshCw size={16}/> Process Another</motion.button>
                     </div>
                   </div>
                 )}
-                <DetectionReport report={report} />
-                <div className="btn-row" style={{ marginTop: '32px' }}>
-                  <button className="btn-secondary" onClick={handleReset}><RefreshCw size={16}/> Process Another</button>
-                </div>
               </div>
             )}
-          </div>
-        )}
 
-        {/* TAB: Text Scanner */}
-        {tab === 'text' && (
-          <div key={`text-${tabKey}`} className="tab-content text-section">
-            <div className="text-input-wrap">
-              <div className="text-input-header">
-                <label>Input Text</label>
-                <span className={`risk-badge ${riskClass}`}>{riskLabel} ({charCount} chars)</span>
-              </div>
-              <div className="heatmap-container">
-                <textarea
-                  value={inputText}
-                  onChange={(e) => setInputText(e.target.value)}
-                  placeholder="Paste raw text here... e.g. My Aadhaar is 2345 6789 0123 and email is test@corp.com"
-                  disabled={textLoading}
-                  spellCheck={false}
-                />
-                {inputText && <LiveHeatmap text={inputText} />}
-              </div>
-              {inputText && (
-                <div className="heatmap-legend">
-                  <span className="legend-label">Live preview:</span>
-                  <span className="legend-item legend-critical">Critical</span>
-                  <span className="legend-item legend-high">High</span>
-                  <span className="legend-item legend-medium">Medium</span>
-                  <span className="legend-item legend-low">Low</span>
-                </div>
-              )}
-            </div>
-
-            {textError && <div className="alert alert-error"><AlertTriangle size={18} /> {textError}</div>}
-
-            <div className="btn-row">
-              <button className="btn-primary" onClick={handleMaskText} disabled={textLoading || !inputText.trim()}>
-                {textLoading ? <><RefreshCw size={16} className="spin" /> Analyzing...</> : <><ScanLine size={16}/> Mask Text</>}
-              </button>
-            </div>
-
-            {textResult && !textLoading && (
-              <div className="text-result-card">
-                <div className="text-result-header">
-                  <span>Sanitized Output</span>
-                  {textResult.pii_found && (
-                    <span className="result-pii-count">{textResult.pii_types.length} type(s) removed</span>
+            {/* TAB: Text Scanner */}
+            {tab === 'text' && (
+              <div className="tab-content text-section">
+                <div className="text-input-wrap">
+                  <div className="text-input-header">
+                    <label>Input Text</label>
+                    <motion.span key={riskClass} className={`risk-badge ${riskClass}`} initial={{ scale: 0.8, opacity: 0 }} animate={{ scale: 1, opacity: 1 }} transition={SPRING}>{riskLabel} ({charCount} chars)</motion.span>
+                  </div>
+                  <div className="heatmap-container">
+                    <textarea
+                      value={inputText}
+                      onChange={(e) => setInputText(e.target.value)}
+                      placeholder="Paste raw text here... e.g. My Aadhaar is 2345 6789 0123 and email is test@corp.com"
+                      disabled={textLoading}
+                      spellCheck={false}
+                    />
+                    {inputText && <LiveHeatmap text={inputText} />}
+                  </div>
+                  {inputText && (
+                    <div className="heatmap-legend">
+                      <span className="legend-label">Live preview:</span>
+                      <span className="legend-item legend-critical">Critical</span>
+                      <span className="legend-item legend-high">High</span>
+                      <span className="legend-item legend-medium">Medium</span>
+                      <span className="legend-item legend-low">Low</span>
+                    </div>
                   )}
                 </div>
-                <div className="text-result-body">
-                  <MaskedText text={textResult.masked} />
+
+                {textError && <motion.div className="alert alert-error" initial={{ opacity: 0, y: -8 }} animate={{ opacity: 1, y: 0 }}><AlertTriangle size={18} /> {textError}</motion.div>}
+
+                <div className="btn-row">
+                  <Magnetic className="btn-primary" onClick={handleMaskText} disabled={textLoading || !inputText.trim()}>
+                    {textLoading ? <><RefreshCw size={16} className="spin" /> Analyzing...</> : <><ScanLine size={16}/> Mask Text</>}
+                  </Magnetic>
                 </div>
-                <DetectionReport report={textResult.pii_found ? [{ text: 'Raw Text Input', pii_types: textResult.pii_types }] : []} />
+
+                <AnimatePresence>
+                  {textResult && !textLoading && (
+                    <motion.div className="text-result-card" initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }} transition={{ duration: 0.4, ease: EASE }}>
+                      <div className="text-result-header">
+                        <span>Sanitized Output</span>
+                        {textResult.pii_found && (
+                          <span className="result-pii-count">{textResult.pii_types.length} type(s) removed</span>
+                        )}
+                      </div>
+                      <div className="text-result-body">
+                        <MaskedText text={textResult.masked} />
+                      </div>
+                      <DetectionReport report={textResult.pii_found ? [{ text: 'Raw Text Input', pii_types: textResult.pii_types }] : []} />
+                    </motion.div>
+                  )}
+                </AnimatePresence>
               </div>
             )}
-          </div>
-        )}
 
-        {/* TAB: Cloud Scan */}
-        {tab === 'cloud' && (
-          <div key={`cloud-${tabKey}`} className="tab-content text-section">
-            <div className="section-heading">
-              <Database size={20} />
-              <div>
-                <h3>Cloud Data Discovery</h3>
-                <p>Scan entire AWS S3 or Azure Blob buckets for sensitive PII. Connect your data source securely.</p>
-              </div>
-            </div>
-
-            <div className="admin-card" style={{marginBottom: '24px'}}>
-              <div className="cloud-form-grid">
-                <div className="text-input-wrap">
-                  <label>Cloud Provider</label>
-                  <select className="config-input" value={cloudForm.provider} onChange={e => setCloudForm({...cloudForm, provider: e.target.value})} disabled={cloudLoading}>
-                    <option value="aws">AWS S3</option>
-                    <option value="azure">Azure Blob Storage</option>
-                  </select>
-                </div>
-                <div className="text-input-wrap">
-                  <label>Bucket / Container Name</label>
-                  <input type="text" className="config-input" value={cloudForm.bucket_name} onChange={e => setCloudForm({...cloudForm, bucket_name: e.target.value})} placeholder="e.g. my-production-data" disabled={cloudLoading} />
-                </div>
-                <div className="text-input-wrap">
-                  <label>Prefix / Folder (Optional)</label>
-                  <input type="text" className="config-input" value={cloudForm.prefix} onChange={e => setCloudForm({...cloudForm, prefix: e.target.value})} placeholder="e.g. 2024/uploads/" disabled={cloudLoading} />
-                </div>
-                <div className="text-input-wrap">
-                  <label>{cloudForm.provider === 'aws' ? 'AWS Access Key ID' : 'Account Name'}</label>
-                  <input type="text" className="config-input" value={cloudForm.access_key} onChange={e => setCloudForm({...cloudForm, access_key: e.target.value})} placeholder={cloudForm.provider === 'aws' ? 'AKIA...' : 'Not required for Azure'} disabled={cloudLoading || cloudForm.provider === 'azure'} />
-                </div>
-                <div className="text-input-wrap">
-                  <label>{cloudForm.provider === 'aws' ? 'AWS Secret Access Key' : 'Azure Connection String'}</label>
-                  <input type="password" className="config-input" value={cloudForm.secret_key} onChange={e => setCloudForm({...cloudForm, secret_key: e.target.value})} placeholder="..." disabled={cloudLoading} />
-                </div>
-                <div className="text-input-wrap">
-                  <label>Operation Mode</label>
-                  <select className="config-input" value={cloudForm.mode} onChange={e => setCloudForm({...cloudForm, mode: e.target.value})} disabled={cloudLoading}>
-                    <option value="discovery">Discovery Only (Generate JSON Report)</option>
-                    <option value="sanitize">Sanitize (Redact files and write to sanitized/ prefix)</option>
-                  </select>
-                </div>
-              </div>
-
-              <div className="btn-row">
-                <button className="btn-primary" onClick={handleCloudScan} disabled={cloudLoading || !cloudForm.bucket_name || !cloudForm.secret_key}>
-                  {cloudLoading
-                    ? <><RefreshCw size={16} className="spin" /> {taskMessage || 'Scanning Bucket...'}</>
-                    : <><Search size={16}/> Start Bucket Scan</>}
-                </button>
-              </div>
-            </div>
-
-            {cloudError && <div className="alert alert-error"><AlertTriangle size={18} /> {cloudError}</div>}
-
-            {cloudResult && !cloudLoading && (
-              <div className="result-section">
-                <div className="image-card">
-                  <div className="image-card-header">
-                    <span className="image-card-title"><span className="image-card-title-dot dot-processed"/> Scan Complete</span>
-                    <a href={cloudResult.download_url} download className="btn-download"><Download size={16} /> Download JSON Report</a>
-                  </div>
-                  <div className="image-card-body cloud-result-body">
-                    <div className="cloud-stat"><span className="cloud-stat-num">{cloudResult.files_scanned}</span><span className="cloud-stat-label">Files Scanned</span></div>
-                    <div className="cloud-stat cloud-stat-alert"><span className="cloud-stat-num">{cloudResult.files_with_pii}</span><span className="cloud-stat-label">Files with PII</span></div>
-                    <p className="cloud-result-note">
-                      {cloudForm.mode === 'sanitize'
-                        ? 'Sanitized files have been uploaded to your bucket under the sanitized/ prefix.'
-                        : 'Review the downloaded JSON report for detailed file-level PII analytics.'}
-                    </p>
+            {/* TAB: Cloud Scan */}
+            {tab === 'cloud' && (
+              <div className="tab-content text-section">
+                <div className="section-heading">
+                  <Database size={20} />
+                  <div>
+                    <h3>Cloud Data Discovery</h3>
+                    <p>Scan entire AWS S3 or Azure Blob buckets for sensitive PII. Connect your data source securely.</p>
                   </div>
                 </div>
-              </div>
-            )}
-          </div>
-        )}
 
-        {/* TAB: Admin */}
-        {tab === 'admin' && role === 'admin' && (
-          <div key={`admin-${tabKey}`} className="tab-content admin-section">
-            {adminError && <div className="alert alert-error" style={{marginBottom: '16px'}}><AlertTriangle size={18} /> {adminError}</div>}
-
-            <div className="admin-grid-2col">
-              <div className="admin-card">
-                <h3><ShieldCheck size={20}/> Detection Policies</h3>
-                <p className="admin-card-desc">Configure active Data Loss Prevention (DLP) entities to detect and redact.</p>
-                <div className="policy-list">
-                  {policies.map(p => (
-                    <div className="policy-item" key={p.pii_type}>
-                      <span style={{fontWeight: 500, fontSize: 14}}>{formatType(p.pii_type)}</span>
-                      <button className="toggle-btn" onClick={() => togglePolicy(p.pii_type, p.is_active)} style={{ color: p.is_active ? 'var(--success)' : 'var(--text-muted)' }}>
-                        {p.is_active ? <ToggleRight size={24}/> : <ToggleLeft size={24}/>}
-                      </button>
+                <div className="admin-card hud-frame" style={{marginBottom: '24px'}}>
+                  <div className="cloud-form-grid">
+                    <div className="text-input-wrap">
+                      <label>Cloud Provider</label>
+                      <select className="config-input" value={cloudForm.provider} onChange={e => setCloudForm({...cloudForm, provider: e.target.value})} disabled={cloudLoading}>
+                        <option value="aws">AWS S3</option>
+                        <option value="azure">Azure Blob Storage</option>
+                      </select>
                     </div>
-                  ))}
-                </div>
-              </div>
+                    <div className="text-input-wrap">
+                      <label>Bucket / Container Name</label>
+                      <input type="text" className="config-input" value={cloudForm.bucket_name} onChange={e => setCloudForm({...cloudForm, bucket_name: e.target.value})} placeholder="e.g. my-production-data" disabled={cloudLoading} />
+                    </div>
+                    <div className="text-input-wrap">
+                      <label>Prefix / Folder (Optional)</label>
+                      <input type="text" className="config-input" value={cloudForm.prefix} onChange={e => setCloudForm({...cloudForm, prefix: e.target.value})} placeholder="e.g. 2024/uploads/" disabled={cloudLoading} />
+                    </div>
+                    <div className="text-input-wrap">
+                      <label>{cloudForm.provider === 'aws' ? 'AWS Access Key ID' : 'Account Name'}</label>
+                      <input type="text" className="config-input" value={cloudForm.access_key} onChange={e => setCloudForm({...cloudForm, access_key: e.target.value})} placeholder={cloudForm.provider === 'aws' ? 'AKIA...' : 'Not required for Azure'} disabled={cloudLoading || cloudForm.provider === 'azure'} />
+                    </div>
+                    <div className="text-input-wrap">
+                      <label>{cloudForm.provider === 'aws' ? 'AWS Secret Access Key' : 'Azure Connection String'}</label>
+                      <input type="password" className="config-input" value={cloudForm.secret_key} onChange={e => setCloudForm({...cloudForm, secret_key: e.target.value})} placeholder="..." disabled={cloudLoading} />
+                    </div>
+                    <div className="text-input-wrap">
+                      <label>Operation Mode</label>
+                      <select className="config-input" value={cloudForm.mode} onChange={e => setCloudForm({...cloudForm, mode: e.target.value})} disabled={cloudLoading}>
+                        <option value="discovery">Discovery Only (Generate JSON Report)</option>
+                        <option value="sanitize">Sanitize (Redact files and write to sanitized/ prefix)</option>
+                      </select>
+                    </div>
+                  </div>
 
-              <div className="admin-card">
-                <div className="admin-card-header-flex">
-                  <h3><Activity size={20}/> Audit Logs</h3>
-                  <button type="button" className="btn-export" onClick={handleExportLogs}>Export CSV</button>
+                  <div className="btn-row">
+                    <Magnetic className="btn-primary" onClick={handleCloudScan} disabled={cloudLoading || !cloudForm.bucket_name || !cloudForm.secret_key}>
+                      {cloudLoading
+                        ? <><RefreshCw size={16} className="spin" /> {taskMessage || 'Scanning Bucket...'}</>
+                        : <><Search size={16}/> Start Bucket Scan</>}
+                    </Magnetic>
+                  </div>
                 </div>
-                <p className="admin-card-desc">Immutable audit log of all system processing and authentication events.</p>
-                <div className="audit-table-wrap">
-                  <table className="audit-table">
-                    <thead><tr><th>Time</th><th>User</th><th>Action</th><th>IP</th></tr></thead>
-                    <tbody>
-                      {logs.map(l => (
-                        <tr key={l.id}>
-                          <td>{new Date(l.timestamp).toLocaleString()}</td>
-                          <td><span className="tag-user"><User size={10} style={{display:'inline'}}/> {l.user_id}</span></td>
-                          <td><span className="tag-primary">{l.action}</span></td>
-                          <td style={{fontFamily: 'monospace'}}>{l.ip_address}</td>
-                        </tr>
-                      ))}
-                      {logs.length === 0 && <tr><td colSpan="4" style={{textAlign:'center', color:'var(--text-muted)'}}>No logs found</td></tr>}
-                    </tbody>
-                  </table>
-                </div>
-              </div>
-            </div>
 
-            <div className="admin-card" style={{ marginTop: '24px' }}>
-              <h3><User size={20}/> User Management and RBAC</h3>
-              <p className="admin-card-desc">Users and roles are strictly synchronized with the server environment variable whitelist.</p>
-              <div className="audit-table-wrap">
-                <table className="audit-table">
-                  <thead><tr><th>ID</th><th>Username / Auth0 Sub</th><th>Role</th></tr></thead>
-                  <tbody>
-                    {users.map(u => (
-                      <tr key={u.id}>
-                        <td>{u.id}</td>
-                        <td style={{fontFamily: 'monospace'}}>{u.username}</td>
-                        <td><span className={`role-badge role-${u.role}`}>{u.role}</span></td>
-                      </tr>
-                    ))}
-                    {users.length === 0 && <tr><td colSpan="3" style={{textAlign:'center', color:'var(--text-muted)'}}>No users found</td></tr>}
-                  </tbody>
-                </table>
-              </div>
-            </div>
+                {cloudError && <motion.div className="alert alert-error" initial={{ opacity: 0, y: -8 }} animate={{ opacity: 1, y: 0 }}><AlertTriangle size={18} /> {cloudError}</motion.div>}
 
-            <div className="admin-grid-2col">
-              <div className="admin-card">
-                <h3><Activity size={20}/> Advanced Analytics</h3>
-                <p className="admin-card-desc">Historical aggregation of redacted entities across the organization.</p>
-                <div className="analytics-list">
-                  {analytics.map(a => {
-                    const maxCount = analytics[0]?.count || 1;
-                    const pct = Math.round((a.count / maxCount) * 100);
-                    return (
-                      <div key={a.name} className="analytics-item">
-                        <div className="analytics-item-header">
-                          <span className="analytics-name">{a.name}</span>
-                          <span className="analytics-count">{a.count} detections</span>
+                <AnimatePresence>
+                  {cloudResult && !cloudLoading && (
+                    <motion.div className="result-section" initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }} transition={{ duration: 0.4, ease: EASE }}>
+                      <div className="image-card">
+                        <div className="image-card-header">
+                          <span className="image-card-title"><span className="image-card-title-dot dot-processed"/> Scan Complete</span>
+                          <motion.a {...hoverTap} href={cloudResult.download_url} download className="btn-download"><Download size={16} /> Download JSON Report</motion.a>
                         </div>
-                        <div className="analytics-bar-track">
-                          <div className="analytics-bar-fill" style={{ width: `${pct}%` }} />
+                        <div className="image-card-body cloud-result-body">
+                          <div className="cloud-stat"><span className="cloud-stat-num"><CountUp value={cloudResult.files_scanned} /></span><span className="cloud-stat-label">Files Scanned</span></div>
+                          <div className="cloud-stat cloud-stat-alert"><span className="cloud-stat-num"><CountUp value={cloudResult.files_with_pii} /></span><span className="cloud-stat-label">Files with PII</span></div>
+                          <p className="cloud-result-note">
+                            {cloudForm.mode === 'sanitize'
+                              ? 'Sanitized files have been uploaded to your bucket under the sanitized/ prefix.'
+                              : 'Review the downloaded JSON report for detailed file-level PII analytics.'}
+                          </p>
                         </div>
                       </div>
-                    );
-                  })}
-                  {analytics.length === 0 && <span style={{color:'var(--text-muted)'}}>No analytics data yet.</span>}
-                </div>
+                    </motion.div>
+                  )}
+                </AnimatePresence>
               </div>
+            )}
 
-              <div className="admin-card">
-                <h3><Settings size={20}/> Global Masking Style</h3>
-                <p className="admin-card-desc">Establish global standards for data redaction across all processed documents.</p>
-                <div className="masking-options">
-                  {[
-                    { value: 'LABEL',    label: '[ENTITY_MASKED]', desc: 'Labeled token' },
-                    { value: 'BLACKOUT', label: '████████',        desc: 'Full blackout'  },
-                    { value: 'ASTERISK', label: '***',             desc: 'Asterisk'       },
-                  ].map(opt => (
-                    <label key={opt.value} className={`masking-option ${settings.masking_style === opt.value ? 'masking-option-active' : ''}`}>
-                      <input type="radio" name="masking" value={opt.value} checked={settings.masking_style === opt.value} onChange={handleSettingsChange} />
-                      <span className="masking-option-label">{opt.label}</span>
-                      <span className="masking-option-desc">{opt.desc}</span>
-                    </label>
-                  ))}
-                </div>
-              </div>
-            </div>
+            {/* TAB: Admin */}
+            {tab === 'admin' && role === 'admin' && (
+              <div className="tab-content admin-section">
+                {adminError && <motion.div className="alert alert-error" style={{marginBottom: '16px'}} initial={{ opacity: 0, y: -8 }} animate={{ opacity: 1, y: 0 }}><AlertTriangle size={18} /> {adminError}</motion.div>}
 
-            <div className="admin-card" style={{ marginTop: '24px' }}>
-              <h3><Type size={20}/> Custom Regex Policy Builder</h3>
-              <p className="admin-card-desc">Construct custom regular expressions to detect and redact proprietary data formats.</p>
-              <div className="regex-builder-form">
-                <input type="text" className="regex-input" placeholder="Entity Name (e.g. EMP_ID)" value={newRegexName} onChange={e=>setNewRegexName(e.target.value)} />
-                <input type="text" className="regex-input font-mono" placeholder="Regex Pattern (e.g. EMP-\d{5})" value={newRegexPattern} onChange={e=>setNewRegexPattern(e.target.value)} />
-                <button className="btn-primary" onClick={handleAddRegex} disabled={!newRegexName || !newRegexPattern}>Add Rule</button>
-              </div>
-              <div className="policy-list">
-                {customRegex.map(p => (
-                  <div className="policy-item" key={p.id}>
-                    <span className="regex-name">{p.name} <span className="regex-pattern">{p.pattern}</span></span>
-                    <button className="btn-danger" onClick={() => handleDeleteRegex(p.id)}>Delete</button>
+                <div className="admin-grid-2col">
+                  <Reveal className="admin-card hud-frame" variants={scaleIn}>
+                    <h3><ShieldCheck size={20}/> Detection Policies</h3>
+                    <p className="admin-card-desc">Configure active Data Loss Prevention (DLP) entities to detect and redact.</p>
+                    <div className="policy-list">
+                      {policies.map((p, i) => (
+                        <motion.div className="policy-item" key={p.pii_type} initial={{ opacity: 0, x: -12 }} animate={{ opacity: 1, x: 0 }} transition={{ delay: i * 0.04 }}>
+                          <span style={{fontWeight: 500, fontSize: 14}}>{formatType(p.pii_type)}</span>
+                          <motion.button whileTap={{ scale: 0.85 }} className="toggle-btn" onClick={() => togglePolicy(p.pii_type, p.is_active)} style={{ color: p.is_active ? 'var(--safe)' : 'var(--text-muted)' }}>
+                            {p.is_active ? <ToggleRight size={24}/> : <ToggleLeft size={24}/>}
+                          </motion.button>
+                        </motion.div>
+                      ))}
+                    </div>
+                  </Reveal>
+
+                  <Reveal className="admin-card hud-frame" variants={scaleIn}>
+                    <div className="admin-card-header-flex">
+                      <h3><Activity size={20}/> Audit Logs</h3>
+                      <motion.button {...hoverTap} type="button" className="btn-export" onClick={handleExportLogs}>Export CSV</motion.button>
+                    </div>
+                    <p className="admin-card-desc">Immutable audit log of all system processing and authentication events.</p>
+                    <div className="audit-table-wrap">
+                      <table className="audit-table">
+                        <thead><tr><th>Time</th><th>User</th><th>Action</th><th>IP</th></tr></thead>
+                        <tbody>
+                          {logs.map((l, i) => (
+                            <motion.tr key={l.id} initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ delay: Math.min(i * 0.03, 0.4) }}>
+                              <td>{new Date(l.timestamp).toLocaleString()}</td>
+                              <td><span className="tag-user"><User size={10} style={{display:'inline'}}/> {l.user_id}</span></td>
+                              <td><span className="tag-primary">{l.action}</span></td>
+                              <td style={{fontFamily: 'var(--font-mono)'}}>{l.ip_address}</td>
+                            </motion.tr>
+                          ))}
+                          {logs.length === 0 && <tr><td colSpan="4" style={{textAlign:'center', color:'var(--text-muted)'}}>No logs found</td></tr>}
+                        </tbody>
+                      </table>
+                    </div>
+                  </Reveal>
+                </div>
+
+                <Reveal className="admin-card hud-frame" variants={scaleIn} style={{ marginTop: '24px' }}>
+                  <h3><User size={20}/> User Management and RBAC</h3>
+                  <p className="admin-card-desc">Users and roles are strictly synchronized with the server environment variable whitelist.</p>
+                  <div className="audit-table-wrap">
+                    <table className="audit-table">
+                      <thead><tr><th>ID</th><th>Username / Auth0 Sub</th><th>Role</th></tr></thead>
+                      <tbody>
+                        {users.map((u, i) => (
+                          <motion.tr key={u.id} initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ delay: Math.min(i * 0.03, 0.4) }}>
+                            <td>{u.id}</td>
+                            <td style={{fontFamily: 'var(--font-mono)'}}>{u.username}</td>
+                            <td><span className={`role-badge role-${u.role}`}>{u.role}</span></td>
+                          </motion.tr>
+                        ))}
+                        {users.length === 0 && <tr><td colSpan="3" style={{textAlign:'center', color:'var(--text-muted)'}}>No users found</td></tr>}
+                      </tbody>
+                    </table>
                   </div>
-                ))}
-                {customRegex.length === 0 && <span style={{color:'var(--text-muted)', fontSize:13}}>No custom rules defined.</span>}
+                </Reveal>
+
+                <div className="admin-grid-2col">
+                  <Reveal className="admin-card hud-frame" variants={scaleIn}>
+                    <h3><Activity size={20}/> Advanced Analytics</h3>
+                    <p className="admin-card-desc">Historical aggregation of redacted entities across the organization.</p>
+                    <div className="analytics-list">
+                      {analytics.map(a => {
+                        const maxCount = analytics[0]?.count || 1;
+                        const pct = Math.round((a.count / maxCount) * 100);
+                        return (
+                          <div key={a.name} className="analytics-item">
+                            <div className="analytics-item-header">
+                              <span className="analytics-name">{a.name}</span>
+                              <span className="analytics-count">{a.count} detections</span>
+                            </div>
+                            <div className="analytics-bar-track">
+                              <motion.div className="analytics-bar-fill" initial={{ width: 0 }} whileInView={{ width: `${pct}%` }} viewport={{ once: true }} transition={{ duration: 0.9, ease: EASE }} />
+                            </div>
+                          </div>
+                        );
+                      })}
+                      {analytics.length === 0 && <span style={{color:'var(--text-muted)'}}>No analytics data yet.</span>}
+                    </div>
+                  </Reveal>
+
+                  <Reveal className="admin-card hud-frame" variants={scaleIn}>
+                    <h3><Settings size={20}/> Global Masking Style</h3>
+                    <p className="admin-card-desc">Establish global standards for data redaction across all processed documents.</p>
+                    <div className="masking-options">
+                      {[
+                        { value: 'LABEL',    label: '[ENTITY_MASKED]', desc: 'Labeled token' },
+                        { value: 'BLACKOUT', label: '████████',        desc: 'Full blackout'  },
+                        { value: 'ASTERISK', label: '***',             desc: 'Asterisk'       },
+                      ].map(opt => (
+                        <motion.label whileHover={{ x: 3 }} key={opt.value} className={`masking-option ${settings.masking_style === opt.value ? 'masking-option-active' : ''}`}>
+                          <input type="radio" name="masking" value={opt.value} checked={settings.masking_style === opt.value} onChange={handleSettingsChange} />
+                          <span className="masking-option-label">{opt.label}</span>
+                          <span className="masking-option-desc">{opt.desc}</span>
+                        </motion.label>
+                      ))}
+                    </div>
+                  </Reveal>
+                </div>
+
+                <Reveal className="admin-card hud-frame" variants={scaleIn} style={{ marginTop: '24px' }}>
+                  <h3><Type size={20}/> Custom Regex Policy Builder</h3>
+                  <p className="admin-card-desc">Construct custom regular expressions to detect and redact proprietary data formats.</p>
+                  <div className="regex-builder-form">
+                    <input type="text" className="regex-input" placeholder="Entity Name (e.g. EMP_ID)" value={newRegexName} onChange={e=>setNewRegexName(e.target.value)} />
+                    <input type="text" className="regex-input font-mono" placeholder="Regex Pattern (e.g. EMP-\d{5})" value={newRegexPattern} onChange={e=>setNewRegexPattern(e.target.value)} />
+                    <Magnetic className="btn-primary" onClick={handleAddRegex} disabled={!newRegexName || !newRegexPattern}>Add Rule</Magnetic>
+                  </div>
+                  <div className="policy-list">
+                    {customRegex.map(p => (
+                      <motion.div className="policy-item" key={p.id} initial={{ opacity: 0, x: -12 }} animate={{ opacity: 1, x: 0 }}>
+                        <span className="regex-name">{p.name} <span className="regex-pattern">{p.pattern}</span></span>
+                        <motion.button {...hoverTap} className="btn-danger" onClick={() => handleDeleteRegex(p.id)}>Delete</motion.button>
+                      </motion.div>
+                    ))}
+                    {customRegex.length === 0 && <span style={{color:'var(--text-muted)', fontSize:13}}>No custom rules defined.</span>}
+                  </div>
+                </Reveal>
               </div>
-            </div>
-          </div>
-        )}
+            )}
+          </motion.div>
+        </AnimatePresence>
       </main>
     </div>
+    </MotionConfig>
   );
 }
 
