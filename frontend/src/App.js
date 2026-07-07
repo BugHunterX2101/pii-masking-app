@@ -36,10 +36,12 @@ const slamIn = {
   hidden: { opacity: 0, scaleX: 0.4 },
   show: { opacity: 1, scaleX: 1, transition: SPRING },
 };
+// GPU-only (transform + opacity) — no filter/blur animation, so large tab
+// subtrees like the admin tables never trigger per-frame repaints.
 const tabVariants = {
-  initial: { opacity: 0, y: 18, filter: 'blur(6px)' },
-  animate: { opacity: 1, y: 0, filter: 'blur(0px)', transition: { duration: 0.38, ease: EASE } },
-  exit: { opacity: 0, y: -14, filter: 'blur(6px)', transition: { duration: 0.22, ease: 'easeIn' } },
+  initial: { opacity: 0, y: 18 },
+  animate: { opacity: 1, y: 0, transition: { duration: 0.34, ease: EASE } },
+  exit: { opacity: 0, y: -14, transition: { duration: 0.2, ease: 'easeIn' } },
 };
 const hoverTap = { whileHover: { scale: 1.03 }, whileTap: { scale: 0.96 } };
 
@@ -137,7 +139,7 @@ function AmbientOrbs() {
       mx.set((e.clientX / window.innerWidth - 0.5) * 44);
       my.set((e.clientY / window.innerHeight - 0.5) * 44);
     };
-    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mousemove', onMove, { passive: true });
     return () => window.removeEventListener('mousemove', onMove);
   }, [mx, my]);
   const x1 = useTransform(x, (v) => v * 1.2);
