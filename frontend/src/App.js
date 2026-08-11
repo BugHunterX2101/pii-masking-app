@@ -1284,7 +1284,7 @@ export default function App() {
         </motion.div>
         <motion.div className="status-indicator" variants={fadeUp}><div className="status-dot online" />Auth0 Connected</motion.div>
         <motion.div className="status-indicator" variants={fadeUp}><div className="status-dot online" />Redis Queue Ready</motion.div>
-        <motion.div className="status-indicator" variants={fadeUp}><div className="status-dot online" />GCP Vision Active</motion.div>
+        <motion.div className="status-indicator" variants={fadeUp}><div className="status-dot online" />RapidOCR Local OCR</motion.div>
       </motion.div>
 
       <main className="App-main">
@@ -1295,7 +1295,7 @@ export default function App() {
         >
           {[
             { icon: <Layers size={20} />, title: 'Supported Formats', sub: 'PDF · DOCX · IMG · CSV · JSONL' },
-            { icon: <Search size={20} />, title: 'Detection Engine', sub: 'Presidio + GCP Vision OCR' },
+            { icon: <Search size={20} />, title: 'Detection Engine', sub: 'Presidio + RapidOCR' },
             { icon: <Zap size={20} />, title: 'Async Processing', sub: 'Celery + Redis Worker Queue' },
           ].map((c, i) => (
             <TiltCard key={i} className="glass-stat-card">
