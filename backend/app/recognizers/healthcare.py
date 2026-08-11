@@ -29,7 +29,12 @@ mrn_recognizer = PatternRecognizer(
 
 icd10_pattern = Pattern(
     name="icd10_pattern",
-    regex=r"\b[A-TV-Z][0-9][0-9AB]\.?[0-9A-TV-Z]{0,4}\b",
+    # Official ICD-10 structure: one letter (A-Z excluding U) followed by
+    # exactly TWO digits, then an optional decimal with 1-3 digits and an
+    # optional 7th-character extension letter (e.g. "E11.9", "S72.301A").
+    # The old pattern (`[A-TV-Z][0-9][0-9AB]...`) also matched "B2B" — a
+    # letter+digit+letter string that is not a valid ICD-10 code.
+    regex=r"\b[A-TV-Z][0-9]{2}(?:\.[0-9]{1,3}[A-Z]?)?\b",
     score=0.3,
 )
 icd10_recognizer = PatternRecognizer(

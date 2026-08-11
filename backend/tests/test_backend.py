@@ -338,3 +338,85 @@ def test_synthesize_empty_text():
     result = pii_engine.detect_and_synthesize_text("   ", ["PERSON"])
     assert result["found"] is False
     assert result["matches"] == 0
+
+
+# ---------------------------------------------------------------------------
+# PERSON verification gate + ICD-10 strictness (masked-document accuracy)
+#
+# Regression for the real resume that was over-redacted: spaCy's NER tagged
+# tech/product words (Prometheus, Java, NumPy, Linux, Streamlit, Express.js,
+# Keras Tuner, Tailwind CSS, "Chapter Bengaluru" ...) as PERSON with a
+# 0.85 score, and the loose ICD-10 pattern matched "B2B". Both classes of
+# false positive are now rejected; genuine names and codes still pass.
+# ---------------------------------------------------------------------------
+_DEFAULT_ENTITIES = [
+    "PERSON", "EMAIL_ADDRESS", "PHONE_NUMBER", "CREDIT_CARD",
+    "AADHAAR", "PAN_CARD", "VEHICLE_REG",
+    "EU_IBAN", "EU_VAT",
+    "US_ROUTING_NUMBER", "BR_CPF", "BR_CNPJ",
+    "PROVIDER_NPI", "MEDICAL_RECORD_NUMBER", "ICD10_CODE", "HEALTH_PLAN_ID",
+]
+
+_RESUME_TEXT = (
+    "Vedit Agrawal | veditagrawal21@gmail.com | +91 8000809591 | "
+    "Education: BMS College of Engineering, Bengaluru India. "
+    "Implemented system monitoring using Prometheus and Grafana. "
+    "Built a B2B lead platform with Node.js, Express.js, Groq (LLaMA 3.3 70B). "
+    "Tuned models with Keras Tuner, shipped a Streamlit dashboard. "
+    "Skills: Python, C/C++, Java, JavaScript, NumPy, Tailwind CSS, Linux, Core CS. "
+    "Volunteer: BMSCE GeeksForGeeks Student Chapter, Bengaluru India."
+)
+
+
+def _hit_types(text, entities):
+    return [(r.entity_type, text[r.start:r.end]) for r in pii_engine.detect_raw(text, entities)]
+
+
+def test_resume_produces_no_false_positive_redactions():
+    """The exact resume scenario: only the email and phone may be flagged.
+
+    Before the PERSON gate, this text produced 14 hits (10 hallucinated
+    PERSON spans plus the ICD-10 "B2B"); after the fix it must be exactly
+    the two real pieces of contact PII.
+    """
+    hits = _hit_types(_RESUME_TEXT, _DEFAULT_ENTITIES)
+    types = sorted({t for t, _ in hits})
+    assert types == ["EMAIL_ADDRESS", "PHONE_NUMBER"], f"unexpected hits: {hits}"
+    assert all(t != "PERSON" for t, _ in hits)
+    assert all(t != "ICD10_CODE" for t, _ in hits)
+
+
+def test_person_gate_rejects_unknown_capitalized_words():
+    """Brand/product words the NER calls PERSON must be dropped unless the
+    token is a known common name."""
+    for sentence in [
+        "Prometheus monitors the Java cluster with NumPy and Linux.",
+        "The Streamlit dashboard replaced the Express.js backend.",
+    ]:
+        hits = _hit_types(sentence, ["PERSON"])
+        assert hits == [], f"unexpected PERSON hits: {hits}"
+
+
+def test_person_gate_keeps_common_names():
+    """Genuine names (present in the common-name list) still pass the gate."""
+    text = "John Smith and Sarah Johnson presented the quarterly results."
+    hits = _hit_types(text, ["PERSON"])
+    names = {snippet for _, snippet in hits}
+    assert "John" in names or "John Smith" in names, f"no John hit: {hits}"
+    assert "Sarah" in names or "Sarah Johnson" in names, f"no Sarah hit: {hits}"
+
+
+def test_icd10_requires_two_digits():
+    """The ICD-10 pattern must match real codes and reject "B2B"-style strings.
+
+    Old pattern `[A-TV-Z][0-9][0-9AB]...` matched letter+digit+letter (B2B,
+    C3PO). Official codes are letter + TWO digits + optional decimal part.
+    """
+    text = "Diagnosis B2B C3PO versus E11.9 and S72.301A plus F41."
+    hits = _hit_types(text, ["ICD10_CODE"])
+    flagged = {snippet for _, snippet in hits}
+    assert "E11.9" in flagged, f"E11.9 should flag: {hits}"
+    assert "S72.301A" in flagged, f"S72.301A should flag: {hits}"
+    assert "F41" in flagged, f"F41 should flag: {hits}"
+    assert "B2B" not in flagged, f"B2B must not flag: {hits}"
+    assert "C3PO" not in flagged, f"C3PO must not flag: {hits}"

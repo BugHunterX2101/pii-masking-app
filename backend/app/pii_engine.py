@@ -163,6 +163,70 @@ def _remove_overlaps(results):
             last_end = res.end
     return filtered
 
+# ---------------------------------------------------------------------------
+# PERSON verification gate.
+#
+# spaCy's NER tags ordinary words as PERSON with a confidently-looking score
+# (0.85 by default in Presidio). On a real resume it flagged "Prometheus",
+# "Java", "NumPy", "Linux", "Streamlit", "Express.js", "Keras Tuner",
+# "Tailwind CSS", and even the merged "Chapter Bengaluru" as person names —
+# while missing the actual name on the page. A DLP tool that blackens those
+# words is worse than useless, so every NER PERSON hit is verified against a
+# list of common given/family names before it is accepted. A name that is not
+# in the list is simply not flagged — a deliberate, documented precision-first
+# trade-off (the same approach Microsoft Presidio recommends for production).
+# ---------------------------------------------------------------------------
+
+_KNOWN_NAMES = None
+
+
+def _known_person_names() -> set:
+    """Common given/family names from Faker's en_US person provider (~1,700
+    names, already a project dependency). Lazy-loaded once per process."""
+    global _KNOWN_NAMES
+    if _KNOWN_NAMES is None:
+        from faker.providers.person.en_US import Provider
+        names = set()
+        for attr in ("first_names", "last_names"):
+            values = getattr(Provider, attr, {})
+            if isinstance(values, dict):
+                names.update(values)
+            else:
+                names.update(values)
+        _KNOWN_NAMES = names
+    return _KNOWN_NAMES
+
+
+# Title-cased word ("John", "JOHN") or a single-letter initial ("A", "A.").
+# Anything containing digits or punctuation ("Express.js", "LLaMA 3.3") fails.
+_PERSON_TOKEN_RE = re.compile(r"^[A-Z][A-Za-z]*$|^[A-Z]\.?$")
+
+
+def _verify_person_span(text: str, start: int, end: int) -> bool:
+    """Accept an NER PERSON hit only if it reads like a real person name:
+    purely alphabetic title-cased tokens (single-letter initials allowed) with
+    at least one token from the common-name list."""
+    tokens = text[start:end].split()
+    if not tokens:
+        return False
+    for tok in tokens:
+        if not _PERSON_TOKEN_RE.match(tok):
+            return False
+    known = _known_person_names()
+    return any(tok.rstrip(".") in known for tok in tokens)
+
+
+def _filter_person_results(text: str, results) -> list:
+    """Drop unverifiable PERSON hits before overlap resolution so a hallucinated
+    name can never win an overlap battle against a real detection."""
+    if not results:
+        return results
+    return [
+        r for r in results
+        if r.entity_type != "PERSON" or _verify_person_span(text, r.start, r.end)
+    ]
+
+
 def detect_and_mask_text(text: str, active_entities: list[str], masking_style: str = "LABEL", custom_patterns: Optional[list] = None, language: Optional[str] = None) -> dict:
     """
     Use Presidio to analyze and mask text based on active policies and custom regex.
@@ -174,6 +238,7 @@ def detect_and_mask_text(text: str, active_entities: list[str], masking_style: s
 
     # Analyze
     results = _get_analyzer().analyze(text=text, entities=active_entities, language=language) if active_entities else []
+    results = _filter_person_results(text, results)
     
     # Add custom regex results
     results.extend(_apply_custom_regex(text, custom_patterns))
@@ -218,6 +283,7 @@ def detect_raw(text: str, active_entities: list[str], custom_patterns: Optional[
     language = _resolve_language(language, text)
 
     results = _get_analyzer().analyze(text=text, entities=active_entities, language=language) if active_entities else []
+    results = _filter_person_results(text, results)
     results.extend(_apply_custom_regex(text, custom_patterns))
     # Remove overlaps to prevent downstream processing errors
     return _remove_overlaps(results)
@@ -246,6 +312,7 @@ def detect_and_synthesize_text(text: str, active_entities: list[str], custom_pat
     language = _resolve_language(language, text)
 
     results = _get_analyzer().analyze(text=text, entities=active_entities, language=language) if active_entities else []
+    results = _filter_person_results(text, results)
     results.extend(_apply_custom_regex(text, custom_patterns))
     results = _remove_overlaps(results)
     

@@ -411,8 +411,11 @@ Regex matches alone produce false positives — random strings that merely *look
 | `PROVIDER_NPI` | CMS algorithm (80840 prefix + Luhn) |
 | `US_ROUTING_NUMBER` | ABA mod-10 with 3-7-1 weights |
 | `PAN_CARD` | Mod-36 checksum used as a **confidence boost** (the checksum is not officially published, so plain matches are still flagged — a DLP tool must err toward flagging) |
+| `ICD10_CODE` | Strict official structure — letter + **two** digits + optional decimal part (`E11.9`, `S72.301A`, `F41`); rejects letter+digit+letter strings such as `B2B` |
 
 Validated matches are promoted to full confidence (1.0); identifiers that fail their checksum are dropped from the regional entity (they may still be caught by a generic class such as `PHONE_NUMBER`). Overlapping detections are resolved score-aware, keeping the strongest match per span.
+
+**`PERSON` hits are verified against a known-name list.** The spaCy NER hallucinates person names for ordinary words — on a real resume it tagged `Prometheus`, `Java`, `NumPy`, `Linux`, `Streamlit`, `Express.js`, and even the merged `Chapter Bengaluru` as PERSON with a 0.85 score, while missing the actual name on the page. Every NER `PERSON` hit must therefore contain at least one token from a list of ~1,700 common given/family names (Faker's en_US provider, already a dependency); anything else is dropped. A name not in the list is deliberately not flagged — the same precision-first stance Microsoft recommends for production Presidio deployments.
 
 Regional recognizers live in `backend/app/recognizers/` and load automatically at startup; all 16 shipped entities are active by default so no PII class is silently missed, and every entity can be **dynamically toggled on/off** by admins via the policy dashboard without redeploying. Custom regex patterns can also be added at runtime.
 
@@ -713,7 +716,7 @@ pii-masking-app/
 | **Zero-Trust RBAC** | Role re-evaluated from env var on every login; database never the source of truth |
 | **Live UI** | Real-time PII heatmap, command palette (Ctrl+K), toast notifications, animated canvas |
 | **Exact Redaction** | Word-level PDF, run-level DOCX (formatting preserved), span-exact image masking — no over- or under-redaction |
-| **Verified Accuracy** | 35 automated tests: check-digit validation, email policy, multilingual routing, and masked-document guarantees |
+| **Verified Accuracy** | 39 automated tests: check-digit validation, verified-name PERSON gate, email policy, multilingual routing, and masked-document guarantees |
 
 <br/>
 
