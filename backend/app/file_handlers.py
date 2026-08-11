@@ -1,143 +1,341 @@
-import fitz  # PyMuPDF
-from docx import Document
 import io
+import re
 from typing import Optional
 
-def process_docx(file_bytes: bytes, active_entities: list[str], detect_fn, masking_style: str = "LABEL", custom_patterns: Optional[list] = None) -> tuple[bytes, list]:
+import fitz  # PyMuPDF
+from docx import Document
+
+from backend.app import pii_engine
+
+# ---------------------------------------------------------------------------
+# Shared helpers
+# ---------------------------------------------------------------------------
+
+_ocr_engine = None
+
+
+def _get_ocr_engine():
+    """Lazy singleton: RapidOCR models load once per process (~6s cold).
+
+    RapidOCR is a local ONNX OCR (no cloud API, no credentials, works on any
+    host including Hugging Face Spaces). The GCP Vision path it replaces
+    required GOOGLE_APPLICATION_CREDENTIALS and failed on deployments without
+    them — and added a network round-trip per image.
+    """
+    global _ocr_engine
+    if _ocr_engine is None:
+        from rapidocr_onnxruntime import RapidOCR
+        _ocr_engine = RapidOCR()
+    return _ocr_engine
+
+
+def _mask_token(entity_type: str, masking_style: str) -> str:
+    """Replacement token, kept byte-for-byte identical to detect_and_mask_text."""
+    style = (masking_style or "LABEL").upper()
+    if style == "BLACKOUT":
+        return "████████"
+    if style == "ASTERISK":
+        return "***"
+    return f"[{entity_type}_MASKED]"
+
+
+def _spans_to_boxes(text: str, words, spans) -> set:
+    """Map detection spans (in `text` space) to word indices.
+
+    `words` is a list of (start, end, index) tuples describing where each word
+    sits inside `text`. Returns the set of word indices whose characters
+    overlap any detection span — partial overlaps included, so a span that
+    ends mid-word still redacts the whole word (no partial characters left
+    visible), while words merely *containing* a substring are never touched
+    unless they actually intersect the flagged span.
+    """
+    redacted = set()
+    for ws, we, wi in words:
+        for s, e in spans:
+            if ws < e and we > s:
+                redacted.add(wi)
+                break
+    return redacted
+
+
+# ---------------------------------------------------------------------------
+# PDF (native text) — word-exact redaction
+# ---------------------------------------------------------------------------
+def process_pdf(file_bytes: bytes, active_entities: list[str], detect_raw_fn, custom_patterns: Optional[list] = None) -> tuple[bytes, list]:
+    """Redact native-text PDFs at the word level.
+
+    The old implementation used `page.search_for(substring)`, which silently
+    failed on text split across lines / ligatures / soft hyphens (PII stayed
+    visible while the report claimed it was masked) and over-redacted any
+    other occurrence *containing* the substring (flagging "John" also blacked
+    out "Johnston"). Here we extract word boxes ourselves, rebuild the page
+    text from those words, run detection on it, and redact exactly the boxes
+    whose words intersect a detection span. No silent failures: every flagged
+    span maps to concrete rectangles or is reported as missed.
+    """
+    report = []
+    out_io = io.BytesIO()
+
+    with fitz.open(stream=file_bytes, filetype="pdf") as doc:
+        for page in doc:
+            raw_words = page.get_text("words", sort=True)  # (x0,y0,x1,y1,word,block,line,word_no)
+            if not raw_words:
+                continue
+
+            # Rebuild page text from the extracted words and remember where
+            # each word lives in that string (offsets are exact by construction).
+            parts = []
+            word_spans = []  # (start, end, index)
+            pos = 0
+            for wi, w in enumerate(raw_words):
+                if wi > 0:
+                    parts.append(" ")
+                    pos += 1
+                start = pos
+                parts.append(w[4])
+                pos += len(w[4])
+                word_spans.append((start, pos, wi))
+            page_text = "".join(parts)
+            if not page_text.strip():
+                continue
+
+            language = pii_engine.resolve_language(page_text)
+            results = detect_raw_fn(page_text, active_entities, custom_patterns, language=language)
+            if not results:
+                continue
+
+            found_types = set()
+            missed = []
+            redacted_indices = set()
+            for res in results:
+                found_types.add(res.entity_type)
+                overlapped = {wi for ws, we, wi in word_spans if ws < res.end and we > res.start}
+                if overlapped:
+                    redacted_indices |= overlapped
+                else:
+                    # Span maps to no word box (should not happen with word-built
+                    # text) — report it honestly instead of claiming success.
+                    missed.append((res.entity_type, page_text[res.start:res.end]))
+
+            if redacted_indices:
+                for wi in sorted(redacted_indices):
+                    w = raw_words[wi]
+                    rect = fitz.Rect(w[0] - 1, w[1] - 1, w[2] + 1, w[3] + 1)
+                    page.add_redact_annot(rect, fill=(0, 0, 0))
+                page.apply_redactions()
+
+            if found_types:
+                report.append({
+                    "text": "PDF Page Content",
+                    "pii_types": sorted(found_types),
+                })
+
+            for ent, snippet in missed:
+                report.append({"text": f"PDF (unmapped span: {ent})", "pii_types": [ent], "snippet": snippet})
+
+        doc.save(out_io)
+
+    return out_io.getvalue(), report
+
+
+# ---------------------------------------------------------------------------
+# DOCX — run-level redaction (formatting preserved) + headers/footers
+# ---------------------------------------------------------------------------
+def _para_text(para) -> str:
+    return "".join(run.text for run in para.runs)
+
+
+def _apply_spans_to_paragraph(para, spans, masking_style):
+    """Replace flagged spans inside a paragraph at run granularity.
+
+    Editing runs directly (instead of `para.text = masked`) keeps every
+    unaffected run's formatting (bold / italic / font / color) intact — the
+    old implementation collapsed each paragraph to a single run and destroyed
+    all formatting. Spans that cross run boundaries are handled by applying
+    the replacement to the tail of the first run and clearing the covered
+    parts of the following runs.
+    """
+    runs = para.runs
+    if not runs:
+        return
+    run_starts = []
+    pos = 0
+    for r in runs:
+        run_starts.append(pos)
+        pos += len(r.text)
+    para_len = pos
+
+    # Collect per-run edits as (local_start, local_end, token), then apply
+    # each run from the end backwards so earlier local offsets stay valid.
+    edits = {i: [] for i in range(len(runs))}
+    for s, e, ent in spans:
+        s = max(0, s)
+        e = min(para_len, e)
+        if e <= s:
+            continue
+        token = _mask_token(ent, masking_style)
+        # Runs overlapping [s, e)
+        first_run = None
+        last_run = None
+        for i, rs in enumerate(run_starts):
+            re_ = rs + len(runs[i].text)
+            if rs < e and re_ > s:
+                if first_run is None:
+                    first_run = i
+                last_run = i
+        if first_run is None:
+            continue
+        if first_run == last_run:
+            rs = run_starts[first_run]
+            edits[first_run].append((s - rs, e - rs, token))
+        else:
+            # Token goes in the tail of the first run; clear the rest.
+            rs = run_starts[first_run]
+            edits[first_run].append((s - rs, len(runs[first_run].text), token))
+            for i in range(first_run + 1, last_run):
+                edits[i].append((0, len(runs[i].text), ""))
+            lrs = run_starts[last_run]
+            edits[last_run].append((0, e - lrs, ""))
+
+    for i, run_edits in edits.items():
+        if not run_edits:
+            continue
+        run = runs[i]
+        text = run.text
+        for ls, le, token in sorted(run_edits, key=lambda x: x[0], reverse=True):
+            text = text[:ls] + token + text[le:]
+        run.text = text
+
+
+def _process_docx_paragraph(para, active_entities, detect_raw_fn, masking_style, custom_patterns, report, report_label):
+    text = _para_text(para)
+    if not text.strip():
+        return
+    language = pii_engine.resolve_language(text)
+    results = detect_raw_fn(text, active_entities, custom_patterns, language=language)
+    if not results:
+        return
+    spans = [(r.start, r.end, r.entity_type) for r in results]
+    _apply_spans_to_paragraph(para, spans, masking_style)
+    report.append({"text": report_label, "pii_types": sorted({r.entity_type for r in results})})
+
+
+def process_docx(file_bytes: bytes, active_entities: list[str], detect_raw_fn, masking_style: str = "LABEL", custom_patterns: Optional[list] = None) -> tuple[bytes, list]:
     doc = Document(io.BytesIO(file_bytes))
     report = []
-    
+
     for para in doc.paragraphs:
-        if not para.text.strip():
-            continue
-        res = detect_fn(para.text, active_entities, masking_style, custom_patterns)
-        if res["found"]:
-            para.text = res["redacted"]
-            report.append({
-                "text": "DOCX Paragraph",
-                "pii_types": res["types"]
-            })
-            
+        _process_docx_paragraph(para, active_entities, detect_raw_fn, masking_style, custom_patterns, report, "DOCX Paragraph")
+
     for table in doc.tables:
         for row in table.rows:
             for cell in row.cells:
-                if cell.text.strip():
-                    res = detect_fn(cell.text, active_entities, masking_style, custom_patterns)
-                    if res["found"]:
-                        cell.text = res["redacted"]
-                        report.append({
-                            "text": "DOCX Table Cell",
-                            "pii_types": res["types"]
-                        })
+                for para in cell.paragraphs:
+                    _process_docx_paragraph(para, active_entities, detect_raw_fn, masking_style, custom_patterns, report, "DOCX Table Cell")
+
+    # PII often lives in headers/footers (company name, contact email) —
+    # the old implementation never scanned them, so it leaked.
+    for section in doc.sections:
+        for container in (section.header, section.footer):
+            for para in container.paragraphs:
+                _process_docx_paragraph(para, active_entities, detect_raw_fn, masking_style, custom_patterns, report, "DOCX Header/Footer")
+            for table in container.tables:
+                for row in table.rows:
+                    for cell in row.cells:
+                        for para in cell.paragraphs:
+                            _process_docx_paragraph(para, active_entities, detect_raw_fn, masking_style, custom_patterns, report, "DOCX Header/Footer")
 
     out_io = io.BytesIO()
     doc.save(out_io)
     return out_io.getvalue(), report
 
 
-def process_pdf(file_bytes: bytes, active_entities: list[str], detect_raw_fn, custom_patterns: Optional[list] = None) -> tuple[bytes, list]:
-    """
-    Process native text PDFs using PyMuPDF redactions.
-    detect_raw_fn should be a function that returns Presidio analyzer results (so we have start/end chars).
-    """
-    report = []
-    out_io = io.BytesIO()
-    
-    with fitz.open(stream=file_bytes, filetype="pdf") as doc:
-        for page in doc:
-            text = page.get_text()
-            if not text.strip():
-                continue
-                
-            results = detect_raw_fn(text, active_entities, custom_patterns)
-            if not results:
-                continue
-                
-            found_types = set()
-            for res in results:
-                found_types.add(res.entity_type)
-                # Get the exact substring that was flagged
-                substring = text[res.start:res.end]
-                if not substring.strip():
-                    continue
-                
-                # Find it on the page
-                quads = page.search_for(substring)
-                for quad in quads:
-                    page.add_redact_annot(quad, fill=(0,0,0))
-                    
-            if found_types:
-                report.append({
-                    "text": "PDF Page Content",
-                    "pii_types": list(found_types)
-                })
-                page.apply_redactions()
-                
-        doc.save(out_io)
-        
-    return out_io.getvalue(), report
+# ---------------------------------------------------------------------------
+# Images — local OCR + span-exact box redaction
+# ---------------------------------------------------------------------------
+def _word_boxes_in_line(line_text: str, line_box) -> list:
+    """Estimate per-word boxes inside an OCR text line.
 
-def mask_pii_in_image_gcp(image_bytes: bytes, active_entities: list[str], detect_raw_fn, custom_patterns: Optional[list] = None):
+    RapidOCR returns one box per text *line* (not per word). To redact exactly
+    the flagged words instead of the whole line, we slice the line's bounding
+    box horizontally in proportion to each word's character length. Left- and
+    right-edge positions are interpolated along the quad's top/bottom edges so
+    slightly rotated lines stay approximately correct.
+    """
+    words = [(m.start(), m.end(), m.group()) for m in re.finditer(r"\S+", line_text)]
+    if not words or len(line_text) == 0:
+        return []
+    total = len(line_text)
+    tl, tr, br, bl = line_box
+    boxes = []
+    for ws, we, word in words:
+        f1 = ws / total
+        f2 = we / total
+        x0 = min(tl[0] + f1 * (tr[0] - tl[0]), bl[0] + f1 * (br[0] - bl[0]))
+        x1 = max(tl[0] + f2 * (tr[0] - tl[0]), bl[0] + f2 * (br[0] - bl[0]))
+        y0 = min(tl[1], bl[1])
+        y1 = max(tr[1], br[1])
+        boxes.append((x0, y0, x1, y1, ws, we, word))
+    return boxes
+
+
+def mask_pii_in_image(image_bytes: bytes, active_entities: list[str], detect_raw_fn, custom_patterns: Optional[list] = None):
     import cv2
     import numpy as np
-    from google.cloud import vision  # type: ignore[import-untyped]
-    import re
-    
-    # 1. OCR with Google Cloud Vision
-    client = vision.ImageAnnotatorClient()
-    image = vision.Image(content=image_bytes)
-    response = client.text_detection(image=image)
-    texts = response.text_annotations
-    
-    if response.error.message:
-        raise Exception(f"GCP Vision API Error: {response.error.message}")
-        
-    if not texts:
-        return image_bytes, []
 
-    # Decode image using OpenCV for drawing
     nparr = np.frombuffer(image_bytes, np.uint8)
     img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
     if img is None:
         raise Exception("Failed to decode image using OpenCV.")
-        
+
+    engine = _get_ocr_engine()
+    ocr_result, _ = engine(img)
+    if not ocr_result:
+        return image_bytes, []
+
+    lines = [{"box": [tuple(map(float, p)) for p in entry[0]], "text": entry[1]} for entry in ocr_result]
+
+    # Rebuild the full text from OCR lines and keep each line's offset window,
+    # so Presidio spans map back to the exact line and then to word boxes.
+    full_text_parts = []
+    line_windows = []  # (start, end)
+    pos = 0
+    for ln in lines:
+        line_windows.append((pos, pos + len(ln["text"])))
+        full_text_parts.append(ln["text"])
+        pos += len(ln["text"]) + 1
+    full_text = "\n".join(ln["text"] for ln in lines)
+
+    language = pii_engine.resolve_language(full_text)
+    results = detect_raw_fn(full_text, active_entities, custom_patterns, language=language)
+    if not results:
+        return image_bytes, []
+
     masked = img.copy()
     report = []
-    
-    # The first element is the full document text
-    full_text = texts[0].description
-    
-    # 2. Run Presidio on the full context block
-    detection_results = detect_raw_fn(full_text, active_entities, custom_patterns)
-    
-    if not detection_results:
+    redacted_regions = []
+    for res in results:
+        s, e = res.start, res.end
+        for li, (ls, le) in enumerate(line_windows):
+            part_s = max(s, ls) - ls
+            part_e = min(e, le) - ls
+            if part_e <= part_s:
+                continue
+            line = lines[li]
+            for (x0, y0, x1, y1, ws, we, word) in _word_boxes_in_line(line["text"], line["box"]):
+                if ws < part_e and we > part_s:
+                    pad = 1
+                    p0 = (int(x0 - pad), int(y0 - pad))
+                    p1 = (int(x1 + pad), int(y1 + pad))
+                    cv2.rectangle(masked, p0, p1, (0, 0, 0), -1)
+                    redacted_regions.append((p0, p1))
+                    report.append({
+                        "text": word,
+                        "pii_types": sorted({res.entity_type}),
+                    })
+
+    if not report:
         return image_bytes, []
-        
-    # 3. Extract words that need to be redacted based on full context
-    flagged_words = set()
-    found_types = set()
-    for res in detection_results:
-        pii_string = full_text[res.start:res.end]
-        found_types.add(res.entity_type)
-        words = re.findall(r'\w+', pii_string)
-        # Include all parts of the PII string, even short ones, to ensure complete redaction
-        flagged_words.update(w.lower() for w in words if w.strip())
-        
-    # 4. Redact individual Vision bounding boxes if their word matches a flagged word
-    for text_annotation in texts[1:]:
-        word = text_annotation.description
-        clean_word = re.sub(r'\W+', '', word).lower()
-        
-        if clean_word and clean_word in flagged_words:
-            vertices = text_annotation.bounding_poly.vertices
-            top_left = (vertices[0].x, vertices[0].y)
-            bottom_right = (vertices[2].x, vertices[2].y)
-            
-            cv2.rectangle(masked, top_left, bottom_right, (0, 0, 0), -1)
-            report.append({
-                "text": word,
-                "pii_types": list(found_types)
-            })
-            
-    success, buffer = cv2.imencode('.jpg', masked, [cv2.IMWRITE_JPEG_QUALITY, 95])
+
+    success, buffer = cv2.imencode(".jpg", masked, [cv2.IMWRITE_JPEG_QUALITY, 95])
     return buffer.tobytes(), report

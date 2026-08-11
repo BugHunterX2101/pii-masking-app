@@ -1,9 +1,9 @@
 """
 PII Masking API — FastAPI backend
-Enterprise Phase 2: Auth0 SSO, AWS S3, Google Cloud Vision OCR
+Auth0 SSO, AWS S3 storage, local RapidOCR document masking, NeonDB persistence
 """
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Depends, status, Request, Security
-from fastapi.responses import Response, JSONResponse, FileResponse
+from fastapi.responses import JSONResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import OAuth2PasswordBearer
 from fastapi.security.api_key import APIKeyHeader
@@ -11,15 +11,14 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 import os
 import json
-import io
+import time
 import uuid
 import hashlib
 from typing import Optional
 from pydantic import BaseModel
 import boto3
-from botocore.exceptions import NoCredentialsError
 
-from backend.app import models, database, auth, pii_engine, file_handlers
+from backend.app import models, database, auth, pii_engine, file_handlers, email_verification
 from backend.app.database import engine, get_db
 
 def _add_column_if_missing(conn, table_name: str, column_name: str, postgres_definition: str, sqlite_definition: str):
@@ -32,6 +31,20 @@ def _add_column_if_missing(conn, table_name: str, column_name: str, postgres_def
         existing = {row[1] for row in conn.execute(text(f"PRAGMA table_info({table_name})")).fetchall()}
         if column_name not in existing:
             conn.execute(text(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {sqlite_definition}"))
+
+
+def _make_column_nullable(conn, table_name: str, column_name: str):
+    """Relax a NOT NULL column that older deployed schemas may still enforce.
+
+    The ORM models declare these columns nullable (e.g. audit_logs.user_id is
+    NULL for API-key-driven events), but tables created by earlier migrations
+    can retain a NOT NULL constraint — which silently drops those audit rows.
+    """
+    dialect = conn.dialect.name
+    if dialect == "postgresql":
+        conn.execute(text(f"ALTER TABLE {table_name} ALTER COLUMN {column_name} DROP NOT NULL"))
+    # SQLite fallback tables are created fresh from the ORM, which already
+    # declares the correct nullability, so no action is needed there.
 
 
 def _drop_legacy_unique_indexes(conn):
@@ -57,6 +70,11 @@ def ensure_database_schema():
         _add_column_if_missing(conn, "audit_logs", "api_key_id", "VARCHAR REFERENCES api_keys(id)", "VARCHAR")
         _add_column_if_missing(conn, "custom_regex_policies", "org_id", "INTEGER REFERENCES organizations(id)", "INTEGER")
         _add_column_if_missing(conn, "system_settings", "org_id", "INTEGER REFERENCES organizations(id)", "INTEGER")
+        # Relax stale NOT NULL constraints that would silently drop audit rows
+        # created without a user (API-key-driven events).
+        _make_column_nullable(conn, "audit_logs", "user_id")
+        _make_column_nullable(conn, "audit_logs", "org_id")
+        _make_column_nullable(conn, "audit_logs", "api_key_id")
         _drop_legacy_unique_indexes(conn)
 
     db = database.SessionLocal()
@@ -82,10 +100,15 @@ except Exception as e:
 
 app = FastAPI(title="Enterprise Privacy Suite", version="4.0.0")
 
+# CORS: origins are configurable via ALLOWED_ORIGINS (comma-separated).
+# Credentials are disabled because the app authenticates with Bearer tokens,
+# not cookies — and a wildcard origin combined with credentials is rejected by
+# browsers anyway.
+_allowed_origins = [o.strip() for o in os.getenv("ALLOWED_ORIGINS", "*").split(",") if o.strip()]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
+    allow_origins=_allowed_origins,
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
     expose_headers=["X-PII-Report", "X-PII-Count"],
@@ -96,17 +119,75 @@ app.add_middleware(
 # -------------------------------------------------------------------
 AWS_REGION = os.getenv("AWS_REGION", "us-east-2")
 S3_BUCKET = os.getenv("S3_BUCKET_NAME", "pii-mask-ocr-files")
-DEFAULT_DLP_ENTITIES = ["PERSON", "EMAIL_ADDRESS", "PHONE_NUMBER", "CREDIT_CARD", "AADHAAR", "PAN_CARD"]
+# Every entity the shipped recognizers can detect is active by default so no
+# PII class is silently missed. Admin can toggle individual policies.
+DEFAULT_DLP_ENTITIES = [
+    "PERSON", "EMAIL_ADDRESS", "PHONE_NUMBER", "CREDIT_CARD",
+    "AADHAAR", "PAN_CARD", "VEHICLE_REG",
+    "EU_IBAN", "EU_VAT",
+    "US_ROUTING_NUMBER", "BR_CPF", "BR_CNPJ",
+    "PROVIDER_NPI", "MEDICAL_RECORD_NUMBER", "ICD10_CODE", "HEALTH_PLAN_ID",
+]
+MAX_UPLOAD_BYTES = int(os.getenv("MAX_UPLOAD_BYTES", str(100 * 1024 * 1024)))  # 100 MB default
 
 s3_client = boto3.client('s3', region_name=AWS_REGION)
 
-# Point GCP SDK to our JSON file credentials
-gcp_creds = os.getenv("GCP_CREDENTIALS_JSON")
-if gcp_creds:
-    with open("/tmp/gcp.json", "w") as f:
-        f.write(gcp_creds)
-    os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = "/tmp/gcp.json"
+# Rate limiting for API-key authenticated routes (fixed 60s window per key).
+_rl_client = None
 
+def _get_rate_limit_client():
+    global _rl_client
+    if _rl_client is None:
+        try:
+            import redis
+            _rl_client = redis.from_url(
+                os.getenv("REDIS_URL", "redis://localhost:6379/0"),
+                socket_connect_timeout=1,
+                socket_timeout=1,
+            )
+        except Exception as exc:
+            print(f"[RATE LIMIT] Redis unavailable, rate limiting disabled: {exc}")
+            _rl_client = False
+    return _rl_client or None
+
+def _check_api_key_rate_limit(key_id: str, limit_per_minute: int):
+    """Fixed-window counter per API key. Fails open if Redis is unreachable."""
+    client = _get_rate_limit_client()
+    if client is None:
+        return
+    try:
+        window = int(time.time() // 60)
+        bucket = f"apikey_rl:{key_id}:{window}"
+        count = client.incr(bucket)
+        if count == 1:
+            client.expire(bucket, 120)
+        if count > (limit_per_minute or 1000):
+            raise HTTPException(status_code=429, detail="Rate limit exceeded. Please retry later.")
+    except HTTPException:
+        raise
+    except Exception:
+        pass  # fail open on transient Redis errors
+
+
+def _check_ip_rate_limit(ip: str, limit_per_minute: int = 20):
+    """Fixed-window counter per client IP for auth endpoints. Fails open."""
+    if not ip:
+        return
+    client = _get_rate_limit_client()
+    if client is None:
+        return
+    try:
+        window = int(time.time() // 60)
+        bucket = f"ip_rl:{ip}:{window}"
+        count = client.incr(bucket)
+        if count == 1:
+            client.expire(bucket, 120)
+        if count > limit_per_minute:
+            raise HTTPException(status_code=429, detail="Too many requests. Please try again later.")
+    except HTTPException:
+        raise
+    except Exception:
+        pass  # fail open on transient Redis errors
 
 # -------------------------------------------------------------------
 # Auth0 Integration
@@ -122,6 +203,8 @@ def verify_api_key(api_key: str = Security(api_key_header), db: Session = Depend
     db_key = db.query(models.APIKey).filter(models.APIKey.key_hash == key_hash, models.APIKey.is_active == True).first()
     if not db_key:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid API Key")
+    # Enforce the per-key rate limit (default 1000 req/min) using Redis.
+    _check_api_key_rate_limit(str(db_key.id), db_key.rate_limit)
     return db_key
 
 def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)):
@@ -156,6 +239,15 @@ def get_or_create_default_org(db: Session):
         db.commit()
         db.refresh(org)
     return org
+
+def _resolve_api_key_org(api_key: models.APIKey, db: Session) -> int:
+    """Return the API key's org id, back-filling legacy keys that predate orgs."""
+    if api_key.org_id is not None:
+        return api_key.org_id
+    org = get_or_create_default_org(db)
+    api_key.org_id = org.id
+    db.commit()
+    return org.id
 
 def get_active_entities(db: Session, org_id: Optional[int] = None):
     def load_policies():
@@ -240,87 +332,59 @@ def upload_raw_to_s3(file_bytes: bytes, filename: str, content_type: str) -> str
     )
     return s3_key
 
-def upload_to_s3_and_get_url(file_bytes: bytes, filename: str, content_type: str) -> str:
-    try:
-        s3_key = f"masked_{uuid.uuid4().hex}_{filename}"
-        s3_client.put_object(
-            Bucket=S3_BUCKET,
-            Key=s3_key,
-            Body=file_bytes,
-            ContentType=content_type,
-            # We don't set ACL='public-read' to keep it secure
-        )
-        # Generate presigned URL
-        url = s3_client.generate_presigned_url(
-            'get_object',
-            Params={'Bucket': S3_BUCKET, 'Key': s3_key},
-            ExpiresIn=3600 # 1 hour
-        )
-        return url
-    except Exception as e:
-        print("S3 Upload Error:", e)
-        # Fallback to base64 data URI if S3 fails (for robust local dev without keys)
-        import base64
-        b64 = base64.b64encode(file_bytes).decode('utf-8')
-        return f"data:{content_type};base64,{b64}"
-
 # -------------------------------------------------------------------
 # Auth0 Sync Route
 # -------------------------------------------------------------------
+@app.get("/api/health")
+def health_check(db: Session = Depends(get_db)):
+    """Liveness probe used by the frontend status bar and load balancers."""
+    db_ok = True
+    try:
+        db.execute(text("SELECT 1"))
+    except Exception:
+        db_ok = False
+    return {
+        "status": "ok" if db_ok else "degraded",
+        "database": "ok" if db_ok else "unreachable",
+        "service": "pii-masking-api",
+        "version": "4.0.0",
+    }
+
+
 @app.post("/api/auth/sync")
 def sync_user(request: Request, token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)):
     """Called by frontend right after Auth0 login to sync the user to our Postgres DB."""
+    ip = request.client.host if request.client else "N/A"
+    _check_ip_rate_limit(ip)
+
     payload = auth.verify_auth0_token(token)
     sub = payload.get("sub")
     if not sub:
         raise HTTPException(status_code=401, detail="Invalid token: missing sub claim")
 
-    # Debug: log every claim Auth0 sent so we can diagnose role issues
-    print(f"[AUTH SYNC] sub={sub}")
-    print(f"[AUTH SYNC] Full JWT payload keys: {list(payload.keys())}")
-    print(f"[AUTH SYNC] email={payload.get('email', 'NOT PRESENT')}")
-    print(f"[AUTH SYNC] name={payload.get('name', 'NOT PRESENT')}")
-    print(f"[AUTH SYNC] nickname={payload.get('nickname', 'NOT PRESENT')}")
+    # Verified-provider gate: Auth0's email_verified flag proves mailbox
+    # ownership; the provider policy proves the mailbox is not disposable.
+    user_email = str(payload.get("email", "") or "").strip().lower()
+    email_verified = payload.get("email_verified")
+    if user_email and email_verified is False:
+        raise HTTPException(status_code=403, detail="Email address is not verified.")
+    if not user_email:
+        raise HTTPException(status_code=403, detail="Token is missing an email claim.")
+    allowed, reason = email_verification.validate_email(user_email)
+    if not allowed:
+        raise HTTPException(status_code=403, detail=f"Sign-in denied: {reason}.")
 
     user = db.query(models.User).filter(models.User.username == sub).first()
 
-    # Check environment variable whitelist for admin promotion
-    admin_emails = [e.strip().lower() for e in os.getenv("ADMIN_EMAILS", "veditagrawal21@gmail.com,ceo@company.com").split(",") if e.strip()]
+    # Admin whitelist from environment (case-insensitive, trimmed)
+    admin_emails = {e.strip().lower() for e in os.getenv("ADMIN_EMAILS", "veditagrawal21@gmail.com,ceo@company.com").split(",") if e.strip()}
 
-    # Collect ALL string values from the JWT payload — Auth0 can place email in
-    # different claim names depending on the connection type and custom rules.
-    all_claim_values = []
-    for key, value in payload.items():
-        if isinstance(value, str):
-            all_claim_values.append(value.lower())
-        elif isinstance(value, list):
-            for item in value:
-                if isinstance(item, str):
-                    all_claim_values.append(item.lower())
-
-    user_email = payload.get("email", "").lower()
-
-    is_admin = False
-
-    # Check 1: Direct email match against whitelist
-    if user_email and user_email in admin_emails:
-        is_admin = True
-        print(f"[AUTH SYNC] Admin granted via direct email match: {user_email}")
-
-    # Check 2: Scan ALL claim values for admin email (catches non-standard claim names)
-    if not is_admin:
-        for admin_email in admin_emails:
-            for claim_val in all_claim_values:
-                if admin_email in claim_val:
-                    is_admin = True
-                    print(f"[AUTH SYNC] Admin granted via claim value scan: found '{admin_email}' in '{claim_val}'")
-                    break
-            if is_admin:
-                break
-
-    # Assign role based on checks above
+    # Zero-trust role assignment: admin is granted ONLY on an exact, case-insensitive
+    # match of the verified email claim against the whitelist. (A previous substring
+    # scan could promote lookalike addresses, e.g. "not-<admin>@example.com".)
+    is_admin = bool(user_email) and user_email in admin_emails
     correct_role = "admin" if is_admin else "user"
-    print(f"[AUTH SYNC] Final role decision: {correct_role} (is_admin={is_admin})")
+    print(f"[AUTH SYNC] sub={sub} email={user_email or 'NOT PRESENT'} role={correct_role}")
 
     org = get_or_create_default_org(db)
 
@@ -337,7 +401,6 @@ def sync_user(request: Request, token: str = Depends(oauth2_scheme), db: Session
     db.commit()
     db.refresh(user)
 
-    ip = request.client.host if request.client else "N/A"
     log_audit(db, action="LOGIN", ip=ip, details={"provider": "Auth0", "role_assigned": correct_role, "email_claim": user_email or "NOT_PRESENT"}, user_id=user.id, org_id=user.org_id)
 
     return {"status": "synced", "role": user.role, "user_id": user.id, "org_id": user.org_id}
@@ -505,13 +568,67 @@ def get_analytics(db: Session = Depends(get_db), current_user: models.User = Dep
     sorted_counts = [{"name": k, "count": v} for k, v in sorted(entity_counts.items(), key=lambda item: item[1], reverse=True)]
     return sorted_counts
 
+@app.get("/api/admin/api-keys")
+def list_api_keys(db: Session = Depends(get_db), current_user: models.User = Depends(require_admin)):
+    keys = db.query(models.APIKey).filter(models.APIKey.org_id == current_user.org_id).order_by(models.APIKey.created_at.desc()).all()
+    return [{
+        "id": k.id,
+        "name": k.name,
+        "rate_limit": k.rate_limit,
+        "is_active": k.is_active,
+        "created_at": k.created_at.isoformat() if k.created_at else None
+    } for k in keys]
+
+class APIKeyCreate(BaseModel):
+    name: str = "Default Key"
+    rate_limit: int = 1000
+
+@app.post("/api/admin/api-keys")
+def create_api_key(req: APIKeyCreate, db: Session = Depends(get_db), current_user: models.User = Depends(require_admin)):
+    if req.rate_limit < 1 or req.rate_limit > 1_000_000:
+        raise HTTPException(status_code=400, detail="rate_limit must be between 1 and 1,000,000 requests per minute.")
+    # The plaintext key is returned exactly once; only its SHA-256 hash is stored.
+    plain_key = f"pk_{uuid.uuid4().hex}"
+    key = models.APIKey(
+        id=f"pk_{uuid.uuid4().hex}",
+        org_id=current_user.org_id,
+        name=(req.name or "").strip() or "Default Key",
+        key_hash=hashlib.sha256(plain_key.encode()).hexdigest(),
+        rate_limit=req.rate_limit,
+        is_active=True,
+    )
+    db.add(key)
+    db.commit()
+    log_audit(db, action="API_KEY_CREATED", ip="internal", details={"key_id": key.id}, user_id=current_user.id, org_id=current_user.org_id)
+    return {
+        "id": key.id,
+        "name": key.name,
+        "key": plain_key,
+        "rate_limit": key.rate_limit,
+        "message": "Store this key now — it will not be shown again."
+    }
+
+@app.delete("/api/admin/api-keys/{key_id}")
+def revoke_api_key(key_id: str, db: Session = Depends(get_db), current_user: models.User = Depends(require_admin)):
+    key = db.query(models.APIKey).filter(models.APIKey.id == key_id, models.APIKey.org_id == current_user.org_id).first()
+    if not key:
+        raise HTTPException(status_code=404, detail="API key not found")
+    key.is_active = False
+    db.commit()
+    log_audit(db, action="API_KEY_REVOKED", ip="internal", details={"key_id": key_id}, user_id=current_user.id, org_id=current_user.org_id)
+    return {"msg": "API key revoked"}
+
 # -------------------------------------------------------------------
 # App API Routes (Protected)
 # -------------------------------------------------------------------
 @app.post("/api/upload")
 async def upload_file(request: Request, file: UploadFile = File(...), generate_certificate: bool = Form(False), current_user: models.User = Depends(get_current_user), db: Session = Depends(get_db)):
     file_bytes = await file.read()
-    
+    if len(file_bytes) > MAX_UPLOAD_BYTES:
+        raise HTTPException(status_code=413, detail=f"File exceeds the {MAX_UPLOAD_BYTES // (1024 * 1024)} MB upload limit.")
+    if not file_bytes:
+        raise HTTPException(status_code=400, detail="Uploaded file is empty.")
+
     ext = file.filename.lower().split('.')[-1] if file.filename and '.' in file.filename else ''
     
     try:
@@ -531,8 +648,13 @@ async def upload_file(request: Request, file: UploadFile = File(...), generate_c
         else:
             raise HTTPException(status_code=400, detail="Unsupported file format.")
 
-        # Upload raw file to S3 first
-        s3_key = upload_raw_to_s3(file_bytes, file.filename, media_type)
+        # Upload raw file to S3 first (clean 503 if the storage backend is unavailable)
+        try:
+            s3_key = upload_raw_to_s3(file_bytes, file.filename, media_type)
+        except HTTPException:
+            raise
+        except Exception as exc:
+            raise HTTPException(status_code=503, detail=f"Storage backend unavailable — check AWS credentials. ({exc})")
         active_entities, masking_style, custom_patterns = get_active_entities(db, org_id=current_user.org_id)
         
         org = db.query(models.Organization).filter(models.Organization.id == current_user.org_id).first()
@@ -560,6 +682,8 @@ async def upload_file(request: Request, file: UploadFile = File(...), generate_c
             "task_id": task.id,
             "message": "Document is being processed asynchronously."
         })
+    except HTTPException:
+        raise
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))
 
@@ -578,8 +702,9 @@ async def get_task_status(task_id: str, current_user: models.User = Depends(get_
     elif task_result.status == 'FAILURE':
         response["error"] = str(task_result.info)
     elif task_result.status == 'PROCESSING':
-        # Custom state updated via update_state
-        response["message"] = task_result.info.get('status', 'Processing...') if isinstance(task_result.info, dict) else 'Processing...'
+        # Custom state updated via update_state (info may be None on early states)
+        info = task_result.info
+        response["message"] = info.get('status', 'Processing...') if isinstance(info, dict) else 'Processing...'
 
     return response
 
@@ -602,7 +727,7 @@ async def mask_text(request: Request, req: TextMaskRequest, current_user: models
         "masked": result["redacted"],
         "pii_found": result["found"],
         "pii_types": result["types"],
-        "count": len(result["types"]),
+        "count": result.get("matches", len(result["types"])),
     }
 
 class CloudScanRequest(BaseModel):
@@ -647,21 +772,22 @@ async def cloud_scan_api(request: Request, req: CloudScanRequest, current_user: 
 # -------------------------------------------------------------------
 @app.post("/api/v1/mask-text")
 async def api_v1_mask_text(request: Request, req: TextMaskRequest, api_key: models.APIKey = Depends(verify_api_key), db: Session = Depends(get_db)):
-    active_entities, masking_style, custom_patterns = get_active_entities(db, org_id=int(api_key.org_id))  # type: ignore
+    org_id = _resolve_api_key_org(api_key, db)
+    active_entities, masking_style, custom_patterns = get_active_entities(db, org_id=org_id)
     
     result = pii_engine.detect_and_mask_text(req.text, active_entities, str(masking_style), custom_patterns, language=req.language)
     
     if result["found"]:
         log_audit(db, action="API_TEXT_MASK", ip=request.client.host if request.client else "N/A", details={
             "detected": result["types"]
-        }, org_id=int(api_key.org_id), api_key_id=str(api_key.id))  # type: ignore
+        }, org_id=org_id, api_key_id=str(api_key.id))
         
     return {
         "original": req.text,
         "masked": result["redacted"],
         "pii_found": result["found"],
         "pii_types": result["types"],
-        "count": len(result["types"]),
+        "count": result.get("matches", len(result["types"])),
     }
 
 @app.post("/api/v1/sanitize/dataset")
@@ -681,14 +807,15 @@ async def api_v1_sanitize_dataset(
     media_type = "text/csv" if ext == 'csv' else "application/jsonl"
     
     s3_key = upload_raw_to_s3(file_bytes, file.filename if file.filename else "dataset", media_type)
-    active_entities, _, custom_patterns = get_active_entities(db, org_id=int(api_key.org_id))  # type: ignore
+    org_id = _resolve_api_key_org(api_key, db)
+    active_entities, _, custom_patterns = get_active_entities(db, org_id=org_id)
     
     from backend.app.worker import process_dataset_task
     task = process_dataset_task.delay(s3_key, file.filename, active_entities, custom_patterns, language)  # type: ignore
     
     log_audit(db, action="API_DATASET_SANITIZATION", ip=request.client.host if request.client else "N/A", details={
         "filename": file.filename, "task_id": task.id
-    }, org_id=int(api_key.org_id), api_key_id=str(api_key.id))  # type: ignore
+    }, org_id=org_id, api_key_id=str(api_key.id))
 
     return JSONResponse(status_code=202, content={
         "status": "accepted",
@@ -699,7 +826,8 @@ async def api_v1_sanitize_dataset(
 @app.post("/api/v1/scan/realtime")
 async def api_v1_scan_realtime(request: Request, req: TextMaskRequest, api_key: models.APIKey = Depends(verify_api_key), db: Session = Depends(get_db)):
     """Ultra-fast DLP Gateway for Slack/Teams Webhooks (<100ms)"""
-    active_entities, _, custom_patterns = get_active_entities(db, org_id=int(api_key.org_id))  # type: ignore
+    org_id = _resolve_api_key_org(api_key, db)
+    active_entities, _, custom_patterns = get_active_entities(db, org_id=org_id)
     
     # Fast path: detect_raw avoids the heavy Anonymizer engine if we just need a boolean decision
     results = pii_engine.detect_raw(req.text, active_entities, custom_patterns, language=req.language)
@@ -710,7 +838,7 @@ async def api_v1_scan_realtime(request: Request, req: TextMaskRequest, api_key: 
     if found:
         log_audit(db, action="API_REALTIME_DLP_SCAN", ip=request.client.host if request.client else "N/A", details={
             "detected": entity_types
-        }, org_id=int(api_key.org_id), api_key_id=str(api_key.id))  # type: ignore
+        }, org_id=org_id, api_key_id=str(api_key.id))
         
     return {
         "action": "BLOCK" if found else "ALLOW",

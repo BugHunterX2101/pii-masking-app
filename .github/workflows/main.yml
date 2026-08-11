@@ -7,30 +7,53 @@ on:
     branches: [ "main" ]
 
 jobs:
-  build-and-test:
+  backend-tests:
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v3
+    - uses: actions/checkout@v4
 
     - name: Set up Python
-      uses: actions/setup-python@v4
+      uses: actions/setup-python@v5
       with:
-        python-version: "3.10"
+        python-version: "3.12"
 
-    - name: Install Dependencies
+    - name: Install test dependencies
       run: |
         python -m pip install --upgrade pip
-        pip install -r requirements.txt
-        pip install pytest
+        pip install -r backend/requirements-ci.txt
 
-    - name: Run Unit Tests
-      run: |
-        # In a real enterprise app, you would run tests here
-        # pytest backend/tests/
-        echo "Tests passed successfully!"
+    - name: Syntax check
+      run: python -m compileall -q backend/app backend/tests
+
+    - name: Run backend unit tests
+      run: python -m pytest backend/tests -q
+
+  frontend-build:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Node
+      uses: actions/setup-node@v4
+      with:
+        node-version: "18"
+
+    - name: Install frontend dependencies
+      working-directory: frontend
+      run: npm ci
+
+    - name: Build frontend
+      working-directory: frontend
+      run: npm run build
+
+  deploy-hf:
+    needs: [backend-tests, frontend-build]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
 
     - name: Deploy to Hugging Face
-      if: github.event_name == 'push' && github.ref == 'refs/heads/main'
       env:
         HF_TOKEN: ${{ secrets.HF_TOKEN }}
       run: |
@@ -43,6 +66,11 @@ jobs:
             folder_path='.',
             repo_id='vedit2101/pii-masking-app',
             repo_type='space',
-            ignore_patterns=['.git', '.git/*', 'node_modules', 'node_modules/*', 'frontend/node_modules', 'venv']
+            ignore_patterns=[
+                '.git', '.git/*', 'node_modules', 'node_modules/*',
+                'frontend/node_modules', 'frontend/build', 'venv', '.venv', '__pycache__',
+                'backend/tests', '*.db', '*.log', '.env', '.env.local', '.env.*.local',
+                '.kill_pip.ps1', '.stop_uvicorn.ps1', '.uvicorn.log', '.uvicorn.err'
+            ]
         )
         "

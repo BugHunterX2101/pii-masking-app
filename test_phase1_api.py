@@ -1,21 +1,17 @@
+import os
 import requests
 import json
-import uuid
 
-# Configuration - Deployed Hugging Face URL
-BASE_URL = "https://vedit2101-pii-masking-app.hf.space"
+# Configuration — override with environment variables
+BASE_URL = os.getenv("PII_APP_URL", "https://vedit2101-pii-masking-app.hf.space")
+API_KEY = os.getenv("PII_APP_API_KEY", "pk_test_12345")
+
 
 def test_api():
-    print("=== Phase 1 API Verification ===")
-    
-    # 1. Create a dummy API key (assuming you've manually added it to the DB, or we can use a known hash)
-    # For a real test, you'd need an API key that exists in your database.
-    # We will simulate this by demonstrating the exact payload required.
-    
-    api_key = "pk_test_12345"
-    
+    print(f"=== Phase 1 API Verification against {BASE_URL} ===")
+
     headers = {
-        "X-API-Key": api_key,
+        "X-API-Key": API_KEY,
         "Content-Type": "application/json"
     }
 
@@ -24,18 +20,19 @@ def test_api():
         "text": "Mi nombre es Juan Carlos y mi correo es juan@empresa.es",
         "language": "es"
     }
-    
-    print(f"\n[Test 1] Testing Spanish NLP Detection (requires valid API key)...")
+
+    print("\n[Test 1] Testing Spanish NLP Detection...")
     try:
         response = requests.post(f"{BASE_URL}/api/v1/mask-text", json=payload_es, headers=headers)
         if response.status_code == 401:
-            print("Received 401 Unauthorized - This is EXPECTED if the test API key is not in your database!")
-            print("To fully test, connect to your Postgres DB and insert an API key:")
-            print("INSERT INTO api_keys (id, org_id, key_hash, is_active) VALUES ('pk_1', 1, '<sha256_of_your_key>', true);")
+            print("Received 401 Unauthorized — expected if the test API key is not in the database.")
+            print("Create a key via the Admin dashboard (API Keys card), then re-run with:")
+            print("  PII_APP_API_KEY=<your-key> python test_phase1_api.py")
         else:
             print(f"Response ({response.status_code}):", json.dumps(response.json(), indent=2))
     except Exception as e:
-        print(f"Error connecting to server: {e}. Ensure Docker container is running on port 7860.")
+        print(f"Error connecting to server: {e}. Ensure the app is running.")
+
 
 if __name__ == "__main__":
     test_api()

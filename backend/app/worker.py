@@ -30,10 +30,10 @@ def process_document_task(self, s3_key: str, filename: str, content_type: str, a
             out_bytes, report = file_handlers.process_pdf(file_bytes, active_entities, pii_engine.detect_raw, custom_patterns)
             media_type = "application/pdf"
         elif ext in ['docx']:
-            out_bytes, report = file_handlers.process_docx(file_bytes, active_entities, pii_engine.detect_and_mask_text, masking_style, custom_patterns)
+            out_bytes, report = file_handlers.process_docx(file_bytes, active_entities, pii_engine.detect_raw, masking_style, custom_patterns)
             media_type = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
         elif ext in ['jpg', 'jpeg', 'png', 'webp']:
-            out_bytes, report = file_handlers.mask_pii_in_image_gcp(file_bytes, active_entities, pii_engine.detect_raw, custom_patterns)
+            out_bytes, report = file_handlers.mask_pii_in_image(file_bytes, active_entities, pii_engine.detect_raw, custom_patterns)
             media_type = "image/jpeg"
         else:
             raise ValueError("Unsupported file format.")
@@ -118,11 +118,11 @@ def process_batch_task(self, s3_key: str, active_entities: list[str], masking_st
                     out_zip.writestr(f"masked_{filename}", out_b)
                     report_summary.extend(rep)
                 elif ext in ['docx']:
-                    out_b, rep = file_handlers.process_docx(file_bytes, active_entities, pii_engine.detect_and_mask_text, masking_style, custom_patterns)
+                    out_b, rep = file_handlers.process_docx(file_bytes, active_entities, pii_engine.detect_raw, masking_style, custom_patterns)
                     out_zip.writestr(f"masked_{filename}", out_b)
                     report_summary.extend(rep)
                 elif ext in ['jpg', 'jpeg', 'png', 'webp']:
-                    out_b, rep = file_handlers.mask_pii_in_image_gcp(file_bytes, active_entities, pii_engine.detect_raw, custom_patterns)
+                    out_b, rep = file_handlers.mask_pii_in_image(file_bytes, active_entities, pii_engine.detect_raw, custom_patterns)
                     out_zip.writestr(f"masked_{filename}", out_b)
                     report_summary.extend(rep)
             except Exception as ex:
@@ -169,7 +169,7 @@ def process_dataset_task(self, s3_key: str, filename: str, active_entities: list
         response = s3_client.get_object(Bucket=S3_BUCKET, Key=s3_key)
         file_bytes = response['Body'].read()
         
-        ext = filename.lower().split('.')[-1]
+        ext = filename.lower().split('.')[-1] if '.' in filename else ''
         
         self.update_state(state='PROCESSING', meta={'status': 'Parsing dataset...'})
         if ext == 'csv':
@@ -178,6 +178,8 @@ def process_dataset_task(self, s3_key: str, filename: str, active_entities: list
             df = pd.read_json(io.BytesIO(file_bytes), lines=True)
         else:
             raise ValueError("Only CSV and JSONL are supported for AI datasets")
+        if len(df) == 0:
+            return {"status": "success", "message": "Dataset is empty — nothing to sanitize.", "rows_processed": 0}
             
         total_rows = len(df)
         
@@ -305,13 +307,14 @@ def scan_cloud_bucket_task(self, provider: str, bucket_name: str, prefix: str, a
             if ext in ['pdf']:
                 out_b, rep = file_handlers.process_pdf(file_bytes, active_entities, pii_engine.detect_raw, custom_patterns)
             elif ext in ['docx']:
-                out_b, rep = file_handlers.process_docx(file_bytes, active_entities, pii_engine.detect_and_mask_text, masking_style, custom_patterns)
+                out_b, rep = file_handlers.process_docx(file_bytes, active_entities, pii_engine.detect_raw, masking_style, custom_patterns)
             elif ext in ['jpg', 'jpeg', 'png', 'webp']:
-                out_b, rep = file_handlers.mask_pii_in_image_gcp(file_bytes, active_entities, pii_engine.detect_raw, custom_patterns)
+                out_b, rep = file_handlers.mask_pii_in_image(file_bytes, active_entities, pii_engine.detect_raw, custom_patterns)
             elif ext in ['csv', 'jsonl']:
-                # For discovery on datasets, we skip heavy dataset masking in Phase 3 basic scan
-                rep = [{"text": "Dataset Scan skipped in Phase 3 basic scan", "pii_types": []}]
-                out_b = file_bytes # unchanged
+                # Datasets need the row-by-row sanitizer (see process_dataset_task);
+                # a per-file scan cannot redact them, so skip them here.
+                rep = []
+                out_b = None
                 
             # Aggregate found types
             found_types = set()
@@ -326,8 +329,9 @@ def scan_cloud_bucket_task(self, provider: str, bucket_name: str, prefix: str, a
                     "items_found": len(rep)
                 })
                 
-            # If Sanitize mode, write back to a sanitized prefix
-            if mode == "sanitize" and out_b and rep:
+            # Sanitize mode: write back a sanitized copy only for files where PII
+            # was actually found (files without PII are left untouched).
+            if mode == "sanitize" and found_types and out_b is not None:
                 sanitized_key = f"sanitized/{key}"
                 if provider == "aws":
                     client.put_object(Bucket=bucket_name, Key=sanitized_key, Body=out_b)

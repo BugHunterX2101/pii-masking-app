@@ -677,14 +677,36 @@ export default function App() {
   const [users, setUsers] = useState([]);
   const [customRegex, setCustomRegex] = useState([]);
   const [settings, setSettings] = useState({ masking_style: 'LABEL' });
+  const [apiHealth, setApiHealth] = useState(null); // null = checking, 'online' / 'offline'
+  const apiUrl = process.env.REACT_APP_API_URL || '';
+
+  // Poll the backend liveness endpoint so the status bar reflects reality.
+  useEffect(() => {
+    let cancelled = false;
+    const check = async () => {
+      try {
+        const res = await fetch(`${apiUrl}/api/health`);
+        const data = await res.json();
+        if (!cancelled) setApiHealth(data.status === 'ok' ? 'online' : 'degraded');
+      } catch (e) {
+        if (!cancelled) setApiHealth('offline');
+      }
+    };
+    check();
+    const timer = setInterval(check, 30000);
+    return () => { cancelled = true; clearInterval(timer); };
+  }, [apiUrl]);
   const [analytics, setAnalytics] = useState([]);
   const [newRegexName, setNewRegexName] = useState('');
   const [newRegexPattern, setNewRegexPattern] = useState('');
+  const [apiKeys, setApiKeys] = useState([]);
+  const [newKeyName, setNewKeyName] = useState('');
+  const [newKeyRateLimit, setNewKeyRateLimit] = useState(1000);
+  const [createdKey, setCreatedKey] = useState(null);
   const [adminError, setAdminError] = useState('');
   const [stats, setStats] = useState({ docs: 0, pii: 0 });
 
   const fileInputRef = useRef(null);
-  const apiUrl = process.env.REACT_APP_API_URL || '';
 
   // Risk assessment for text tab
   const charCount = inputText.length;
@@ -771,7 +793,8 @@ export default function App() {
         `${apiUrl}/api/admin/users`,
         `${apiUrl}/api/admin/custom-regex`,
         `${apiUrl}/api/admin/settings`,
-        `${apiUrl}/api/admin/analytics`
+        `${apiUrl}/api/admin/analytics`,
+        `${apiUrl}/api/admin/api-keys`
       ];
       const responses = await Promise.all(urls.map(url => fetch(url, { headers })));
       const failed = responses.find(res => !res.ok);
@@ -785,6 +808,7 @@ export default function App() {
       if (data[3]) setCustomRegex(data[3]);
       if (data[4]) setSettings(data[4]);
       if (data[5]) setAnalytics(data[5]);
+      if (data[6]) setApiKeys(data[6]);
     } catch(err) {
       console.error('Failed to load admin data', err);
       setAdminError(err.message || 'Failed to load admin data.');
@@ -821,8 +845,43 @@ export default function App() {
     } catch(e) { setAdminError(e.message); addToast(e.message, 'error'); }
   };
 
+  const handleCreateKey = async () => {
+    setAdminError('');
+    setCreatedKey(null);
+    try {
+      const authToken = requireToken();
+      const res = await fetch(`${apiUrl}/api/admin/api-keys`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${authToken}` },
+        body: JSON.stringify({ name: newKeyName, rate_limit: newKeyRateLimit })
+      });
+      if (!res.ok) throw new Error(await readApiError(res, 'Failed to create API key.'));
+      const data = await res.json();
+      setCreatedKey(data);
+      setNewKeyName('');
+      setNewKeyRateLimit(1000);
+      loadAdminData();
+      addToast('API key created — copy it now, it will not be shown again', 'success');
+    } catch (e) { setAdminError(e.message); addToast(e.message, 'error'); }
+  };
+
+  const handleRevokeKey = async (id) => {
+    setAdminError('');
+    try {
+      const authToken = requireToken();
+      const res = await fetch(`${apiUrl}/api/admin/api-keys/${id}`, {
+        method: 'DELETE',
+        headers: { 'Authorization': `Bearer ${authToken}` }
+      });
+      if (!res.ok) throw new Error(await readApiError(res, 'Failed to revoke API key.'));
+      loadAdminData();
+      addToast('API key revoked', 'info');
+    } catch (e) { setAdminError(e.message); addToast(e.message, 'error'); }
+  };
+
   const handleSettingsChange = async (e) => {
     const val = e.target.value;
+    const previous = settings.masking_style;
     setSettings({ masking_style: val });
     setAdminError('');
     try {
@@ -834,7 +893,12 @@ export default function App() {
       });
       if (!res.ok) throw new Error(await readApiError(res, 'Failed to update settings.'));
       addToast(`Masking style updated to ${val}`, 'success');
-    } catch(e) { setAdminError(e.message); }
+    } catch(e) {
+      // Revert the optimistic update so the UI never lies about what is saved.
+      setSettings({ masking_style: previous });
+      setAdminError(e.message);
+      addToast('Failed to save masking style — reverted.', 'error');
+    }
   };
 
   useEffect(() => { if (tab === 'admin') loadAdminData(); }, [tab, loadAdminData]);
@@ -1214,9 +1278,13 @@ export default function App() {
       </header>
 
       <motion.div className="micro-status-bar" variants={staggerContainer} initial="hidden" animate="show">
-        {['Auth0 Connected', 'Redis Queue Ready', 'GCP Vision Active'].map(label => (
-          <motion.div key={label} className="status-indicator" variants={fadeUp}><div className="status-dot online" />{label}</motion.div>
-        ))}
+        <motion.div className="status-indicator" variants={fadeUp}>
+          <div className={`status-dot ${apiHealth === 'online' ? 'online' : 'offline'}`} />
+          API {apiHealth === 'online' ? 'Online' : apiHealth === 'offline' ? 'Offline' : 'Checking'}
+        </motion.div>
+        <motion.div className="status-indicator" variants={fadeUp}><div className="status-dot online" />Auth0 Connected</motion.div>
+        <motion.div className="status-indicator" variants={fadeUp}><div className="status-dot online" />Redis Queue Ready</motion.div>
+        <motion.div className="status-indicator" variants={fadeUp}><div className="status-dot online" />GCP Vision Active</motion.div>
       </motion.div>
 
       <main className="App-main">
@@ -1320,7 +1388,7 @@ export default function App() {
                   <div className="btn-row" style={{ flexDirection: 'column', alignItems: 'center', gap: '16px' }}>
                     <label className="cert-checkbox-label">
                       <input type="checkbox" checked={generateCertificate} onChange={e => setGenerateCertificate(e.target.checked)} />
-                      <span>Generate HIPAA Compliance Certificate (PDF/DOCX only)</span>
+                      <span>Generate HIPAA Compliance Certificate (PDF / DOCX / Image)</span>
                     </label>
                     <div className="btn-row">
                       <motion.button {...hoverTap} className="btn-secondary" onClick={handleReset}><RefreshCw size={16}/> Clear</motion.button>
@@ -1633,6 +1701,35 @@ export default function App() {
                       </motion.div>
                     ))}
                     {customRegex.length === 0 && <span style={{color:'var(--text-muted)', fontSize:13}}>No custom rules defined.</span>}
+                  </div>
+                </Reveal>
+
+                <Reveal className="admin-card hud-frame" variants={scaleIn} style={{ marginTop: '24px' }}>
+                  <h3><Zap size={20}/> API Keys (Programmatic Access)</h3>
+                  <p className="admin-card-desc">Create keys for the <span className="font-mono">/api/v1</span> endpoints (mask-text, scan/realtime, sanitize/dataset). Keys authenticate via the <span className="font-mono">X-API-Key</span> header and are rate-limited per minute.</p>
+                  <div className="regex-builder-form">
+                    <input type="text" className="regex-input" placeholder="Key name (e.g. Slack Webhook)" value={newKeyName} onChange={e=>setNewKeyName(e.target.value)} />
+                    <input type="number" className="regex-input" min="1" max="1000000" placeholder="Rate limit / min (default 1000)" value={newKeyRateLimit} onChange={e=>setNewKeyRateLimit(parseInt(e.target.value || '0', 10) || 1000)} />
+                    <Magnetic className="btn-primary" onClick={handleCreateKey} disabled={!newKeyName.trim()}><Zap size={16}/> Create Key</Magnetic>
+                  </div>
+                  {createdKey && (
+                    <motion.div className="api-key-created" initial={{ opacity: 0, y: 6 }} animate={{ opacity: 1, y: 0 }}>
+                      <strong>Key created — copy it now:</strong>
+                      <code className="api-key-code">{createdKey.key}</code>
+                      <motion.button {...hoverTap} type="button" className="btn-export" onClick={() => { navigator.clipboard?.writeText(createdKey.key); addToast('Key copied to clipboard', 'success'); }}>Copy</motion.button>
+                    </motion.div>
+                  )}
+                  <div className="policy-list" style={{ marginTop: '14px' }}>
+                    {apiKeys.map(k => (
+                      <motion.div className="policy-item" key={k.id} initial={{ opacity: 0, x: -12 }} animate={{ opacity: 1, x: 0 }}>
+                        <span className="regex-name">{k.name} <span className="regex-pattern">{k.id} · {k.rate_limit}/min</span></span>
+                        <span className={`role-badge ${k.is_active ? 'role-admin' : 'role-user'}`}>{k.is_active ? 'Active' : 'Revoked'}</span>
+                        {k.is_active && (
+                          <motion.button {...hoverTap} className="btn-danger" onClick={() => handleRevokeKey(k.id)}>Revoke</motion.button>
+                        )}
+                      </motion.div>
+                    ))}
+                    {apiKeys.length === 0 && <span style={{color:'var(--text-muted)', fontSize:13}}>No API keys yet. Create one to use the programmatic API.</span>}
                   </div>
                 </Reveal>
               </div>

@@ -1,0 +1,16 @@
+# CI-only test dependencies — deliberately excludes the spaCy model wheels so
+# the pipeline stays fast while still covering the pure-logic units in
+# backend/tests (model loading is lazy in pii_engine).
+pytest>=8.0,<9.0
+presidio-analyzer==2.2.35
+presidio-anonymizer==2.2.35
+spacy==3.7.4
+langdetect==1.0.9
+Faker==24.4.0
+dnspython>=2.6.0,<3.0.0
+python-stdnum>=1.19,<2.0
+# Document-handler tests build real PDF/DOCX fixtures
+PyMuPDF==1.24.1
+python-docx==1.1.0
+opencv-python-headless>=4.8.0,<5.0.0
+numpy>=1.24.0,<2.0.0

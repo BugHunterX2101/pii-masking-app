@@ -20,7 +20,7 @@ pinned: false
 [![Celery](https://img.shields.io/badge/Workers-Celery-37814A?style=for-the-badge)](https://docs.celeryq.dev/)
 [![Auth0](https://img.shields.io/badge/Auth-Auth0_SSO-eb5424?style=for-the-badge&logo=auth0)](https://auth0.com/)
 [![AWS S3](https://img.shields.io/badge/Storage-AWS_S3-ff9900?style=for-the-badge&logo=amazonaws)](https://aws.amazon.com/s3/)
-[![GCP Vision](https://img.shields.io/badge/OCR-GCP_Vision-4285F4?style=for-the-badge&logo=googlecloud)](https://cloud.google.com/vision)
+[![RapidOCR](https://img.shields.io/badge/OCR-RapidOCR-5B21B6?style=for-the-badge)](https://github.com/RapidAI/RapidOCR)
 [![PostgreSQL](https://img.shields.io/badge/Database-PostgreSQL-4169E1?style=for-the-badge&logo=postgresql)](https://www.postgresql.org/)
 [![Docker](https://img.shields.io/badge/Deploy-Docker-2496ED?style=for-the-badge&logo=docker)](https://www.docker.com/)
 [![Hugging Face](https://img.shields.io/badge/Hosted_on-Hugging_Face-FFD21E?style=for-the-badge&logo=huggingface&logoColor=black)](https://huggingface.co/spaces/vedit2101/pii-masking-app)
@@ -71,22 +71,22 @@ Every day, organizations deal with a ticking compliance time bomb: **unstructure
 
 ### AI-Powered Dual Detection Engine
 Unlike rule-based tools that only catch "known patterns," this system uses a **two-layer detection pipeline**:
-1. **Google Cloud Vision API** — Performs server-side OCR, extracting every character from scanned images, IDs, and screenshots with state-of-the-art accuracy, even on low-quality images.
-2. **Microsoft Presidio (NLP)** — Runs named-entity recognition (NER) on the extracted text using SpaCy's `en_core_web_lg` model to catch contextual PII (like names in a sentence) that regex alone would miss.
+1. **RapidOCR (local ONNX)** — Extracts every character from scanned images, IDs, and screenshots with state-of-the-art accuracy via a bundled ONNX model — fully local, no cloud API, no credentials, no per-image network round-trip.
+2. **Microsoft Presidio (NLP)** — Runs named-entity recognition (NER) on the extracted text using a lazy-loaded SpaCy model to catch contextual PII (like names in a sentence) that regex alone would miss.
 
 ### Multi-Language Support
-The detection engine supports **8 languages** with dedicated SpaCy models:
+The detection engine supports **24 languages**. Each language uses a small spaCy `_sm` model (~10-15 MB) loaded **lazily on first use per language** by a custom `LazySpacyNlpEngine` — so cold start is near-instant and memory only grows for languages actually requested:
 
-| Language | SpaCy Model |
+| Region | Languages |
 |---|---|
-| English | `en_core_web_lg` |
-| Spanish | `es_core_news_lg` |
-| French | `fr_core_news_lg` |
-| German | `de_core_news_lg` |
-| Italian | `it_core_news_lg` |
-| Portuguese | `pt_core_news_lg` |
-| Japanese | `ja_core_news_lg` |
-| Chinese | `zh_core_web_lg` |
+| Western Europe | English, Spanish, French, German, Italian, Portuguese, Dutch, Catalan |
+| Nordic | Danish, Norwegian Bokmål, Swedish, Finnish |
+| Eastern Europe | Polish, Russian, Ukrainian, Czech→*, Slovak→*, Bulgarian→*, Croatian, Slovenian, Macedonian, Lithuanian, Latvian→*, Estonian→*, Hungarian→*, Romanian |
+| Asia | Japanese, Chinese, Korean |
+
+> *Languages marked → are supported by the pipeline's language routing but fall back to the English NER model when a dedicated spaCy 3.7 model is unavailable; regex-backed PII detection (email, phone, Aadhaar, PAN, cards, ...) works in every language regardless.
+
+This replaces the previous setup of eight ~500 MB `_lg` models loaded eagerly at startup (≈4 GB of downloads and RAM before the first request) with a ~90% smaller footprint, instant startup, and triple the language coverage. Languages are auto-detected with `langdetect` when not specified.
 
 ### Event-Driven Asynchronous Architecture
 Large files (multi-page PDFs, high-res images) can take several seconds to process. In a synchronous system, this would cause HTTP timeouts, thread starvation, and a terrible user experience. This suite uses a **full event-driven pipeline**:
@@ -97,8 +97,11 @@ Large files (multi-page PDFs, high-res images) can take several seconds to proce
 
 ### Zero-Trust Security Model
 - **Auth0 SSO**: Users authenticate via corporate identity providers (Microsoft Entra ID, Google Workspace, Okta). No passwords are stored in the application database.
-- **JWT Validation (RS256)**: Every single API call validates the Auth0 JWT against the JWKS endpoint. Unauthenticated requests receive `HTTP 401`.
+- **JWT Validation (RS256)**: Every API call validates the Auth0 JWT against the JWKS endpoint with **issuer verification** (tokens minted by other tenants are rejected) and a **time-based JWKS cache** so key rotations are picked up automatically. Unauthenticated requests receive `HTTP 401`.
+- **Verified-Email-Provider Gate**: `POST /api/auth/sync` rejects any email that is not verified by Auth0, is on the disposable/temporary-mail blocklist (Mailinator, 10MinuteMail, GuerrillaMail, Yopmail, ...), or belongs to a domain with no real MX record. Both lists are environment-configurable.
+- **Per-IP Rate Limiting**: The auth sync endpoint is throttled per client IP (20 req/min) in addition to the per-key limit on the programmatic API.
 - **Ephemeral Storage**: Raw (unmasked) files are temporarily staged in a private S3 prefix and are never returned to the client. Only the masked output is accessible via a time-limited pre-signed URL.
+- **Per-Key Rate Limiting**: Programmatic API keys carry a per-minute limit (default 1000 req/min) enforced with Redis fixed-window counters — exceeding it returns `HTTP 429`.
 
 ### Admin Dashboard and Live Policy Engine
 - **RBAC**: Roles are assigned on every login based on the `ADMIN_EMAILS` environment variable whitelist. Users whose email matches the whitelist receive the `admin` role; all others receive the `user` role. This is enforced server-side on every login — the database is never the source of truth.
@@ -142,9 +145,9 @@ Worker["Celery Worker\nProcess Pool (16 concurrent)"]
 end
 
 subgraph AI [" AI / ML Layer"]
-GCPVision["Google Cloud Vision API\nOCR Engine"]
+RapidOCR["RapidOCR (local ONNX)\nOCR Engine"]
 Presidio["Microsoft Presidio\nNER Engine"]
-Spacy["SpaCy (8 language models)\nNLP Models"]
+Spacy["SpaCy (24 lazy-loaded sm models)\nNLP Models"]
 end
 
 subgraph STORAGE [" Cloud Storage"]
@@ -169,8 +172,8 @@ Endpoints -- "7. Enqueue Task" --> Redis
 Endpoints -- "8. HTTP 202 + task_id" --> Browser
 Redis -- "9. Dequeue Task" --> Worker
 Worker -- "10. Fetch Raw File" --> RawPrefix
-Worker -- "11. OCR Request" --> GCPVision
-GCPVision -- "12. Text Annotations" --> Worker
+Worker -- "11. Local OCR" --> RapidOCR
+RapidOCR -- "12. Text Annotations" --> Worker
 Worker -- "13. NER Detection" --> Presidio
 Presidio --> Spacy
 Spacy -- "14. Detected Entities" --> Worker
@@ -192,18 +195,21 @@ The document goes through a specific pipeline based on its file type:
 flowchart TD
 Start([" File Received by Celery Worker"]) --> TypeCheck{{"File Extension?"}}
 
-TypeCheck -->|".pdf"| PDF["PyMuPDF\nExtract pages as images"]
+TypeCheck -->|".pdf"| PDF["PyMuPDF\nWord-level text extraction"]
 TypeCheck -->|".docx"| DOCX["python-docx\nExtract paragraph runs"]
 TypeCheck -->|".jpg/.png/.webp"| IMG["Raw Image Bytes"]
 TypeCheck -->|".csv/.jsonl"| DS["Dataset Parser\nRow-by-row processing"]
 
-PDF --> GCP1[" GCP Vision API\nper-page OCR"]
-IMG --> GCP2[" GCP Vision API\nfull image OCR"]
-DOCX --> Direct["Direct Text Extraction\n(no OCR needed)"]
+PDF --> Direct["Word-level text extraction\n(no OCR needed — native text)"]
+IMG --> OCR[" RapidOCR (local ONNX)\nfull image OCR"]
+DOCX --> Runs["python-docx\nRun-level extraction"]
 DS --> Direct
 
-GCP1 --> TextBlocks["Text Annotations\n+ Bounding Boxes"]
-GCP2 --> TextBlocks
+OCR --> TextBlocks["Text Annotations\n+ Bounding Boxes"]
+Direct --> Presidio
+Runs --> Presidio
+
+TextBlocks --> Presidio
 
 TextBlocks --> Presidio[" Microsoft Presidio\nNER Detection"]
 Direct --> Presidio
@@ -355,11 +361,11 @@ USERS ||--o{ AUDIT_LOGS : "generates"
 | **ASGI Server** | Uvicorn | Latest | Production-grade ASGI with hot-reload |
 | **Auth** | Auth0 (RS256 JWT) | — | Enterprise SSO; no password management |
 | **ORM** | SQLAlchemy | 2.0 | Type-safe DB sessions |
-| **Database** | PostgreSQL (NeonDB) | 16 | Serverless Postgres; scales to zero |
+| **Database** | PostgreSQL (NeonDB) | 16 | Serverless Postgres; scales to zero (SQLite fallback for no-config boot) |
 | **Task Queue** | Celery | 5.3.6 | Distributed async workers; Redis backend |
 | **Broker** | Redis | 8 | In-memory pub/sub; sub-millisecond latency |
 | **Storage** | AWS S3 + Boto3 | Latest | Durable object storage; pre-signed URL support |
-| **OCR** | Google Cloud Vision API | v1 | Best-in-class accuracy on low-quality scans |
+| **OCR** | RapidOCR (ONNX) | 1.3 | Local OCR — offline, no credentials, no per-image network latency |
 | **NLP / NER** | Microsoft Presidio + SpaCy | 2.2 / 3.7 | Context-aware PII detection beyond regex |
 | **PDF** | PyMuPDF (fitz) | 1.24 | Fast, accurate PDF page rendering |
 | **Word** | python-docx | 1.1 | Native `.docx` manipulation |
@@ -375,18 +381,33 @@ The Presidio NLP engine detects **20+ entity types** out of the box, with custom
 
 | Category | Entities Detected |
 |---|---|
-| **Indian Identity** | `AADHAAR`, `PAN_CARD`, `PASSPORT`, `INDIA_IFSC` |
-| **European Identity** | `IBAN_CODE`, `NHS_NUMBER`, `NRP` |
-| **US Identity** | `US_SSN`, `US_EIN`, `US_PASSPORT` |
-| **Brazilian Identity** | `BRAZIL_CPF` |
-| **Universal Identity** | `PERSON`, `DATE_OF_BIRTH` |
-| **Financial** | `CREDIT_CARD`, `BANK_ACCOUNT` |
+| **Indian Identity** | `AADHAAR`, `PAN_CARD`, `VEHICLE_REG` (custom recognizers) |
+| **European Identity** | `EU_IBAN`, `EU_VAT` (custom recognizers) |
+| **US Identity** | `US_SSN` (built-in), `US_ROUTING_NUMBER` (custom) |
+| **Brazilian Identity** | `BR_CPF`, `BR_CNPJ` (custom recognizers) |
+| **Healthcare / PHI** | `PROVIDER_NPI`, `MEDICAL_RECORD_NUMBER`, `ICD10_CODE`, `HEALTH_PLAN_ID` (custom) |
+| **Universal Identity** | `PERSON`, `DATE_OF_BIRTH`, `LOCATION`, `ADDRESS` (built-in NER) |
+| **Financial** | `CREDIT_CARD`, `BANK_ACCOUNT`, `IBAN` (built-in) |
 | **Contact** | `EMAIL_ADDRESS`, `PHONE_NUMBER`, `URL` |
-| **Location** | `LOCATION`, `ADDRESS` |
 | **Temporal** | `DATE_TIME` |
 | **Digital** | `IP_ADDRESS` |
 
-All entity types can be **dynamically toggled on/off** by admins via the policy dashboard without redeploying. Custom regex patterns can also be added at runtime.
+### Accuracy: check-digit verification
+Regex matches alone produce false positives — random strings that merely *look* like a national identifier. Every regional recognizer therefore validates the identifier's official checksum before reporting it:
+
+| Entity | Verification |
+|---|---|
+| `AADHAAR` | Verhoeff check digit (official UIDAI algorithm) |
+| `EU_IBAN` | ISO 13616 mod-97 check (reference number `GB29 NWBK 6016 1331 9268 19`) |
+| `EU_VAT` | Per-country official checksums (mod-11 weighted, mod-97, CIF, ISO 7064) covering every EU member state plus UK — including the letter-body formats `ATU…` (Austria), CIF (Spain), `IE…F` (Ireland) and `NL…B..` (Netherlands); CZ/SK are format-validated (no checksum exists by law) |
+| `BR_CPF` / `BR_CNPJ` | Two mod-11 check digits |
+| `PROVIDER_NPI` | CMS algorithm (80840 prefix + Luhn) |
+| `US_ROUTING_NUMBER` | ABA mod-10 with 3-7-1 weights |
+| `PAN_CARD` | Mod-36 checksum used as a **confidence boost** (the checksum is not officially published, so plain matches are still flagged — a DLP tool must err toward flagging) |
+
+Validated matches are promoted to full confidence (1.0); identifiers that fail their checksum are dropped from the regional entity (they may still be caught by a generic class such as `PHONE_NUMBER`). Overlapping detections are resolved score-aware, keeping the strongest match per span.
+
+Regional recognizers live in `backend/app/recognizers/` and load automatically at startup; all 16 shipped entities are active by default so no PII class is silently missed, and every entity can be **dynamically toggled on/off** by admins via the policy dashboard without redeploying. Custom regex patterns can also be added at runtime.
 
 ---
 
@@ -396,12 +417,11 @@ All entity types can be **dynamically toggled on/off** by admins via the policy 
 ```
 Python 3.12+
 Node.js 18+
-PostgreSQL 15+ (or NeonDB connection string)
-Redis 7+ (or Docker)
-AWS Account (S3 bucket created)
-Google Cloud Project (Vision API enabled + service account JSON)
-Auth0 Tenant (Single Page Application configured)
+Redis 7+ (or Docker) — required for async document processing
+Optional: PostgreSQL (or NeonDB string), AWS S3, Auth0 tenant
 ```
+
+> **No-config boot:** the app starts with a local SQLite database when `DATABASE_URL` is unset, so you can bring up the API and text-masking features immediately. Point `DATABASE_URL` at PostgreSQL for production/multi-instance deployments.
 
 ### 1. Clone and Configure
 ```bash
@@ -410,28 +430,36 @@ cd pii-masking-app
 ```
 
 ### 2. Environment Variables
-Create a `.env` file at the project root:
+Copy `.env.example` to `.env` and fill in the services you are using. Only `REDIS_URL` is needed for the full async pipeline:
 ```env
-# Database
+# Redis (Celery Broker and Backend) — required for file uploads
+REDIS_URL=redis://localhost:6379/0
+
+# Database (optional — SQLite fallback when unset)
 DATABASE_URL=postgresql://user:password@localhost:5432/pii_masking
 
-# AWS S3
+# AWS S3 (required only for file upload/batch processing)
 AWS_REGION=us-east-2
 S3_BUCKET_NAME=pii-mask-ocr-files
 AWS_ACCESS_KEY_ID=AKIAXXXXXXXXXXXXXXXX
 AWS_SECRET_ACCESS_KEY=xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 
-# Redis (Celery Broker and Backend)
-REDIS_URL=redis://localhost:6379/0
-
 # Auth0 SSO
 AUTH0_DOMAIN=your-tenant.us.auth0.com
+# AUTH0_AUDIENCE=your-api-audience   # set to enforce audience verification
+# JWKS_TTL_SECONDS=21600             # how often the signing keys cache refreshes
 
-# Admin Role Assignment (comma-separated emails)
+# Admin Role Assignment (comma-separated emails — exact match required)
 ADMIN_EMAILS=veditagrawal21@gmail.com,ceo@company.com
 
-# GCP Vision (path to service account JSON)
-GOOGLE_APPLICATION_CREDENTIALS=/path/to/your-gcp-key.json
+# Verified-email-provider policy (comma-separated; override the defaults)
+# VERIFIED_EMAIL_PROVIDERS=gmail.com,outlook.com,yahoo.com
+# DISPOSABLE_EMAIL_DOMAINS=mailinator.com,yopmail.com,10minutemail.com
+
+# CORS allowed origins (comma-separated; "*" allows all)
+# ALLOWED_ORIGINS=https://your-app.vercel.app,http://localhost:3000
+
+# OCR runs locally via RapidOCR (ONNX) — no credentials required
 ```
 
 ### 3. Backend Services
@@ -439,9 +467,8 @@ GOOGLE_APPLICATION_CREDENTIALS=/path/to/your-gcp-key.json
 # Start Redis via Docker
 docker run -d -p 6379:6379 --name redis redis:7
 
-# Install Python dependencies
+# Install Python dependencies (includes 24 small spaCy language models via wheel URLs)
 pip install -r requirements.txt
-python -m spacy download en_core_web_lg
 
 # Start FastAPI server
 uvicorn backend.app.main:app --reload --port 8000
@@ -454,7 +481,7 @@ celery -A backend.app.worker.celery_app worker --loglevel=info --concurrency=4
 ```bash
 cd frontend
 npm install
-echo "REACT_APP_API_URL=http://localhost:8000" > .env.local
+cp .env.example .env.local   # sets REACT_APP_API_URL=http://localhost:8000
 npm start
 # App available at http://localhost:3000
 ```
@@ -493,7 +520,7 @@ Set the following secrets in your Hugging Face Space settings under **Settings >
 
 | Secret Name | Description |
 |---|---|
-| `DATABASE_URL` | NeonDB or any PostgreSQL connection string |
+| `DATABASE_URL` | NeonDB or any PostgreSQL connection string (**optional** — app falls back to SQLite) |
 | `AWS_REGION` | AWS region where your S3 bucket is located |
 | `S3_BUCKET_NAME` | Name of your S3 bucket |
 | `AWS_ACCESS_KEY_ID` | AWS IAM access key |
@@ -501,7 +528,10 @@ Set the following secrets in your Hugging Face Space settings under **Settings >
 | `REDIS_URL` | Defaults to `redis://localhost:6379/0` (local Redis inside the container) |
 | `AUTH0_DOMAIN` | Your Auth0 tenant domain |
 | `ADMIN_EMAILS` | Comma-separated emails to grant admin role |
-| `GCP_CREDENTIALS_JSON` | Full contents of your GCP service account JSON file |
+| `VERIFIED_EMAIL_PROVIDERS` | Comma-separated allowlist of email providers (defaults to the well-known set) |
+| `DISPOSABLE_EMAIL_DOMAINS` | Comma-separated blocklist of disposable/temporary mail domains |
+| `ALLOWED_ORIGINS` | Comma-separated CORS origins (defaults to `*`) |
+| `JWKS_TTL_SECONDS` | How long the Auth0 signing-key cache lives before refresh (default 21600) |
 
 ### Container Architecture on Hugging Face
 
@@ -530,7 +560,8 @@ Authorization: Bearer <your-auth0-jwt>
 
 | Method | Endpoint | Auth | Description |
 |--------|----------|------|-------------|
-| `POST` | `/api/auth/sync` | JWT | Sync Auth0 user to DB; returns assigned role |
+| `GET` | `/api/health` | None | Liveness probe: API + database status (used by the UI status bar) |
+| `POST` | `/api/auth/sync` | JWT | Sync Auth0 user to DB (enforces verified-provider email policy); returns assigned role |
 | `POST` | `/api/upload` | JWT | Upload document; returns `task_id` (HTTP 202) |
 | `GET` | `/api/tasks/{task_id}` | JWT | Poll async task status and result |
 | `POST` | `/api/mask-text` | JWT | Mask PII in raw text (synchronous, <200ms) |
@@ -551,14 +582,30 @@ Authorization: Bearer <your-auth0-jwt>
 | `POST` | `/api/admin/custom-regex` | Add a new custom regex policy |
 | `DELETE` | `/api/admin/custom-regex/{id}` | Delete a custom regex policy |
 | `GET` | `/api/admin/analytics` | PII entity detection frequency analytics |
+| `GET` | `/api/admin/api-keys` | List API keys for programmatic access |
+| `POST` | `/api/admin/api-keys` | Create an API key (plaintext returned once) |
+| `DELETE` | `/api/admin/api-keys/{id}` | Revoke an API key |
 
 ### Programmatic API (API Key Authentication)
+
+Create an API key from the **Admin dashboard → API Keys** card (or `POST /api/admin/api-keys`). Keys authenticate via the `X-API-Key` header and are rate-limited per minute (`rate_limit` on the key, default 1000 req/min — enforced via Redis, returns `429` when exceeded).
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
 | `POST` | `/api/v1/mask-text` | Mask text via API key (for integrations) |
 | `POST` | `/api/v1/sanitize/dataset` | Sanitize a CSV/JSONL training dataset |
 | `POST` | `/api/v1/scan/realtime` | Ultra-fast DLP scan for Slack/Teams webhooks (<100ms) |
+
+```bash
+curl -X POST https://vedit2101-pii-masking-app.hf.space/api/v1/mask-text \
+  -H "X-API-Key: pk_your_key_here" \
+  -H "Content-Type: application/json" \
+  -d '{"text": "My Aadhaar is 2345 6789 0123", "language": "en"}'
+# => {"original": "...", "masked": "My Aadhaar is [AADHAAR_MASKED]",
+#     "pii_found": true, "pii_types": ["AADHAAR"], "count": 1}
+```
+
+> `count` is the number of PII matches found; `pii_types` lists the distinct entity types detected.
 
 ### Example: Upload and Poll
 ```bash
@@ -599,28 +646,35 @@ pii-masking-app/
 │   └── app/
 │       ├── main.py              # FastAPI app: all routes, middleware, S3 helpers
 │       ├── worker.py            # Celery tasks: document, batch, dataset, cloud scan
-│       ├── auth.py              # Auth0 JWT validation (RS256 + JWKS)
+│       ├── auth.py              # Auth0 JWT validation (RS256 + issuer check + TTL JWKS cache)
 │       ├── models.py            # SQLAlchemy ORM: all database models
 │       ├── database.py          # DB engine and session factory
 │       ├── pii_engine.py        # Microsoft Presidio NLP detection and masking
+│       ├── nlp_engine.py        # Lazy-loading multilingual spaCy engine (24 languages)
+│       ├── checksums.py         # Check-digit validators (Verhoeff, Luhn, mod-97, mod-11, ...)
+│       ├── email_verification.py# Verified-provider / disposable-domain / MX policy
 │       ├── file_handlers.py     # PDF (PyMuPDF) and Word (python-docx) processors
 │       ├── compliance_cert.py   # HIPAA compliance certificate generator
+│       ├── tests/               # Pytest suite (runs in CI without model downloads)
 │       └── recognizers/         # Custom regional PII recognizers
-│           ├── india.py         # Aadhaar, PAN, IFSC
-│           ├── europe.py        # IBAN, NHS
-│           ├── usa.py           # SSN, EIN
-│           └── brazil.py        # CPF
+│           ├── india.py         # Aadhaar, PAN, vehicle registration
+│           ├── europe.py        # IBAN, EU VAT
+│           ├── usa.py           # US routing numbers
+│           ├── brazil.py        # CPF, CNPJ
+│           └── healthcare.py    # NPI, MRN, ICD-10, health plan IDs
 ├── frontend/
 │   └── src/
 │       ├── App.js               # Main React app: all tabs, state, API calls
 │       ├── App.css              # Complete design system: dark mode, glassmorphism
-│       └── index.js             # Auth0Provider, app bootstrap
+│       ├── index.js             # Auth0Provider, app bootstrap
+│       └── .env.example         # Frontend env template (REACT_APP_API_URL, Auth0)
 ├── .github/
 │   └── workflows/
-│       └── main.yml             # CI/CD: GitHub Actions to Hugging Face
+│       └── main.yml             # CI/CD: backend tests + frontend build + HF deploy
 ├── Dockerfile                   # Multi-stage build: Node (frontend) then Python (backend)
 ├── supervisord.conf             # Process orchestration: Redis + FastAPI + Celery
-├── requirements.txt             # Python dependencies
+├── requirements.txt             # Python dependencies (incl. spaCy model wheels)
+├── .env.example                 # All supported environment variables
 └── README.md                    # This file
 ```
 
@@ -634,8 +688,8 @@ pii-masking-app/
 |---|---|
 | **Fully Async Pipeline** | HTTP request returns in <100ms while 50-page PDFs are processed in the background |
 | **Zero Plaintext Storage** | Raw files are staged temporarily in S3; only masked outputs are persisted |
-| **Multi-Cloud** | Auth0 (Identity) + GCP (OCR) + AWS (Storage) + NeonDB (Database) |
-| **Multi-Language NLP** | 8 SpaCy language models for global PII detection |
+| **Hybrid Cloud** | Auth0 (Identity) + AWS (Storage) + NeonDB (Database); OCR runs locally on the worker (no cloud dependency) |
+| **Multi-Language NLP** | 24 languages, lazy-loaded small SpaCy models (~10-15 MB each) |
 | **Horizontally Scalable** | Add more Celery workers to any node; Redis broker coordinates automatically |
 | **Enterprise-Ready** | RBAC, Audit Logs, Policy Management, Custom Regex, SSO — all production-grade |
 | **Zero-Trust RBAC** | Role re-evaluated from env var on every login; database never the source of truth |

@@ -1,8 +1,9 @@
+import copy
 import re
 from typing import Optional
 from presidio_analyzer import AnalyzerEngine, PatternRecognizer, Pattern  # type: ignore
-from presidio_analyzer.nlp_engine import NlpEngineProvider  # type: ignore
 from presidio_anonymizer import AnonymizerEngine  # type: ignore
+from backend.app.nlp_engine import LazySpacyNlpEngine
 from backend.app.recognizers import get_all_regional_recognizers
 import langdetect  # type: ignore
 
@@ -10,37 +11,110 @@ import langdetect  # type: ignore
 _analyzer = None
 _anonymizer = None
 
-# Languages supported based on requirements
-SUPPORTED_LANGUAGES = ["en", "es", "fr", "de", "it", "pt", "ja", "zh"]
+# ---------------------------------------------------------------------------
+# Multilingual NER with small, lazy-loaded models.
+#
+# Each language uses a spaCy `_sm` model (~10-15 MB) instead of the former
+# `_lg` models (~500 MB each, all loaded eagerly at startup — several GB of
+# downloads and RAM before the first request). The LazySpacyNlpEngine loads a
+# model only for the language actually requested, so cold start is near
+# instant and memory is bounded. Regex-backed PII (email, phone, Aadhaar,
+# PAN, credit cards, ...) needs no NLP model at all.
+# ---------------------------------------------------------------------------
+SPACY_SM_MODELS = {
+    "en": "en_core_web_sm",
+    "es": "es_core_news_sm",
+    "fr": "fr_core_news_sm",
+    "de": "de_core_news_sm",
+    "it": "it_core_news_sm",
+    "pt": "pt_core_news_sm",
+    "ja": "ja_core_news_sm",
+    "zh": "zh_core_web_sm",
+    "nl": "nl_core_news_sm",
+    "pl": "pl_core_news_sm",
+    "ru": "ru_core_news_sm",
+    "uk": "uk_core_news_sm",
+    "da": "da_core_news_sm",
+    "nb": "nb_core_news_sm",
+    "sv": "sv_core_news_sm",
+    "fi": "fi_core_news_sm",
+    "el": "el_core_news_sm",
+    "ko": "ko_core_news_sm",
+    "ca": "ca_core_news_sm",
+    "ro": "ro_core_news_sm",
+    "hr": "hr_core_news_sm",
+    "lt": "lt_core_news_sm",
+    "mk": "mk_core_news_sm",
+    "sl": "sl_core_news_sm",
+}
+
+SUPPORTED_LANGUAGES = sorted(SPACY_SM_MODELS)
+
+# langdetect returns some codes that differ from the spaCy model codes
+_LANGUAGE_ALIASES = {
+    "no": "nb",       # Norwegian (langdetect) -> Norwegian Bokmål (spaCy)
+    "zh-cn": "zh",    # Simplified Chinese
+    "zh-tw": "zh",    # Traditional Chinese
+}
+
+def resolve_language(text: str) -> str:
+    """Public helper: detect the language of a text once (used by the document
+    handlers so they do not re-run langdetect for every paragraph).
+    """
+    return _resolve_language(None, text)
+
+
+def _resolve_language(language: Optional[str] = None, text: Optional[str] = None) -> str:
+    """Return a supported language code, falling back to detection then English.
+
+    The caller-supplied language must be one of SUPPORTED_LANGUAGES or Presidio
+    raises on unsupported codes; clamping here prevents a 500 on bad input.
+    """
+    if language:
+        mapped = _LANGUAGE_ALIASES.get(language, language)
+        if mapped in SUPPORTED_LANGUAGES:
+            return mapped
+    if text and text.strip():
+        try:
+            detected = langdetect.detect(text)
+            mapped = _LANGUAGE_ALIASES.get(detected, detected)
+            if mapped in SUPPORTED_LANGUAGES:
+                return mapped
+        except Exception:
+            pass
+    return 'en'
 
 def _get_analyzer():
     global _analyzer
     if _analyzer is None:
-        configuration = {
-            "nlp_engine_name": "spacy",
-            "models": [
-                {"lang_code": "en", "model_name": "en_core_web_lg"},
-                {"lang_code": "es", "model_name": "es_core_news_lg"},
-                {"lang_code": "fr", "model_name": "fr_core_news_lg"},
-                {"lang_code": "de", "model_name": "de_core_news_lg"},
-                {"lang_code": "it", "model_name": "it_core_news_lg"},
-                {"lang_code": "pt", "model_name": "pt_core_news_lg"},
-                {"lang_code": "ja", "model_name": "ja_core_news_lg"},
-                {"lang_code": "zh", "model_name": "zh_core_web_lg"},
-            ],
-        }
+        models = [
+            {"lang_code": lang, "model_name": model}
+            for lang, model in SPACY_SM_MODELS.items()
+        ]
         try:
-            provider = NlpEngineProvider(nlp_configuration=configuration)
-            nlp_engine = provider.create_engine()
-            _analyzer = AnalyzerEngine(nlp_engine=nlp_engine, supported_languages=SUPPORTED_LANGUAGES)
+            nlp_engine = LazySpacyNlpEngine(models=models)
+            _analyzer = AnalyzerEngine(
+                nlp_engine=nlp_engine,
+                supported_languages=SUPPORTED_LANGUAGES,
+            )
         except Exception as e:
-            # Fallback to default EN if custom models fail to load
-            print(f"Failed to load multi-language models: {e}. Falling back to default.")
+            # Fallback to the default English engine if initialization fails
+            print(f"Failed to initialize multi-language engine: {e}. Falling back to default.")
             _analyzer = AnalyzerEngine()
-        
-        # Add modular recognizers from all regions
+
+        # Add modular recognizers from all regions, registered for EVERY
+        # supported language. The regional recognizers are pure regex
+        # (language-independent), but Presidio filters recognizers by
+        # `language == supported_language` at analyze time — a recognizer
+        # registered only for "en" silently never fires when the detected
+        # language is Spanish, French, German, etc. (a real bug we hit with
+        # "CIF ESS92174218" resolving to Spanish). A deepcopy preserves each
+        # recognizer's subclass and check-digit validator.
         for recognizer in get_all_regional_recognizers():
-            _analyzer.registry.add_recognizer(recognizer)
+            for lang in SUPPORTED_LANGUAGES:
+                clone = copy.deepcopy(recognizer)
+                clone.supported_language = lang
+                _analyzer.registry.add_recognizer(clone)
 
     return _analyzer
 
@@ -64,16 +138,29 @@ def _apply_custom_regex(text: str, custom_patterns: Optional[list] = None):
     return results
 
 def _remove_overlaps(results):
-    if not results: return []
-    # Sort by start index, then descending end index (to keep the longest match if they start at the same place)
-    sorted_results = sorted(results, key=lambda x: (x.start, -x.end))
+    """Resolve overlapping detections by keeping the strongest match.
+
+    Two recognizers can flag the same span (e.g. the PAN regex recognizer and
+    its checksum-validated twin, or a regional recognizer and Presidio's own).
+    Sort by (start, -end, -score) so that for equal starts the longest,
+    highest-confidence result wins, then greedily keep the best candidate per
+    span. This is deterministic and mirrors Presidio's own score-based
+    overlap handling.
+    """
+    if not results:
+        return []
+    sorted_results = sorted(results, key=lambda x: (x.start, -x.end, -x.score))
     filtered = []
     last_end = -1
     for res in sorted_results:
-        # If this result starts after the previous one ends, it's not an overlap
         if res.start >= last_end:
             filtered.append(res)
-            last_end = max(last_end, res.end)
+            last_end = res.end
+        elif filtered and res.end > filtered[-1].end and res.score > filtered[-1].score:
+            # The new match starts inside the previous one but extends past it
+            # with a higher score — it is the better detection. Replace.
+            filtered[-1] = res
+            last_end = res.end
     return filtered
 
 def detect_and_mask_text(text: str, active_entities: list[str], masking_style: str = "LABEL", custom_patterns: Optional[list] = None, language: Optional[str] = None) -> dict:
@@ -81,15 +168,9 @@ def detect_and_mask_text(text: str, active_entities: list[str], masking_style: s
     Use Presidio to analyze and mask text based on active policies and custom regex.
     """
     if not text.strip():
-        return {"found": False, "types": [], "redacted": text}
+        return {"found": False, "types": [], "matches": 0, "redacted": text}
 
-    if not language:
-        try:
-            language = langdetect.detect(text)
-            if language not in SUPPORTED_LANGUAGES:
-                language = 'en'
-        except:
-            language = 'en'
+    language = _resolve_language(language, text)
 
     # Analyze
     results = _get_analyzer().analyze(text=text, entities=active_entities, language=language) if active_entities else []
@@ -101,7 +182,7 @@ def detect_and_mask_text(text: str, active_entities: list[str], masking_style: s
     results = _remove_overlaps(results)
     
     if not results:
-        return {"found": False, "types": [], "redacted": text}
+        return {"found": False, "types": [], "matches": 0, "redacted": text}
 
     # Anonymize
     from presidio_anonymizer.entities import OperatorConfig
@@ -126,21 +207,16 @@ def detect_and_mask_text(text: str, active_entities: list[str], masking_style: s
     return {
         "found": True,
         "types": list(all_entity_types),
+        "matches": len(results),
         "redacted": anonymized_result.text
     }
 
 def detect_raw(text: str, active_entities: list[str], custom_patterns: Optional[list] = None, language: Optional[str] = None):
     if not text.strip():
         return []
-        
-    if not language:
-        try:
-            language = langdetect.detect(text)
-            if language not in SUPPORTED_LANGUAGES:
-                language = 'en'
-        except:
-            language = 'en'
-            
+
+    language = _resolve_language(language, text)
+
     results = _get_analyzer().analyze(text=text, entities=active_entities, language=language) if active_entities else []
     results.extend(_apply_custom_regex(text, custom_patterns))
     # Remove overlaps to prevent downstream processing errors
@@ -165,22 +241,16 @@ def detect_and_synthesize_text(text: str, active_entities: list[str], custom_pat
     Used for AI Training Data Sanitization to preserve utility.
     """
     if not text.strip():
-        return {"found": False, "types": [], "redacted": text}
+        return {"found": False, "types": [], "matches": 0, "redacted": text}
 
-    if not language:
-        try:
-            language = langdetect.detect(text)
-            if language not in SUPPORTED_LANGUAGES:
-                language = 'en'
-        except:
-            language = 'en'
+    language = _resolve_language(language, text)
 
     results = _get_analyzer().analyze(text=text, entities=active_entities, language=language) if active_entities else []
     results.extend(_apply_custom_regex(text, custom_patterns))
     results = _remove_overlaps(results)
     
     if not results:
-        return {"found": False, "types": [], "redacted": text}
+        return {"found": False, "types": [], "matches": 0, "redacted": text}
 
     all_entity_types = set([r.entity_type for r in results])
     fake = _get_faker(language)
@@ -212,6 +282,7 @@ def detect_and_synthesize_text(text: str, active_entities: list[str], custom_pat
     return {
         "found": True,
         "types": list(all_entity_types),
+        "matches": len(results),
         "redacted": redacted
     }
 
