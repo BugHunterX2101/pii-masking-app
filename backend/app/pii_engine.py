@@ -202,10 +202,60 @@ def _known_person_names() -> set:
 _PERSON_TOKEN_RE = re.compile(r"^[A-Z][A-Za-z]*$|^[A-Z]\.?$")
 
 
+# Strong name markers. Only unambiguous, name-adjacent words qualify: greeting
+# words ("dear"), bare "by"/"from"/"to" and verbs ("called", "named",
+# "contact") are deliberately excluded — "powered by Tailwind CSS", "from
+# Google Cloud Support" or "please contact Support Team" must never become a
+# person name. Ambiguous words (names?, contact, author, by, from, to) are
+# only accepted in their colon form ("Name:", "Contact:", "By:"); honorifics
+# and signature words work bare ("Mr John Smith", "Regards, ...").
+_NAME_MARKER_RE = re.compile(
+    r"(?i)(?:^|[\s:;,.!?\-])(?:"
+    r"mr|mrs|ms|mx|dr|prof|sir|miss|madam|"
+    r"sincerely|regards|best\s+regards|kind\s+regards|warm\s+regards|"
+    r"submitted\s+by|written\s+by|prepared\s+by|signed\s+by|authored\s+by|"
+    r"known\s+as|aka|names?:|contact:|author:|by:|from:|to:"
+    r")\s*[:;,.]?\s*$"
+)
+
+# A run of 2-4 title-cased alphabetic words (single-letter initials allowed).
+_NAME_RUN_RE = re.compile(
+    r"\b(?:[A-Z][A-Za-z]*|[A-Z]\.)(?:\s+(?:[A-Z][A-Za-z]*|[A-Z]\.)){1,3}\b"
+)
+
+# Marker words that can precede a name on the SAME run ("Contact John Smith",
+# "Mr John Smith"). When a run starts with one of these, the span must move
+# past it so the marker itself is never masked.
+_SINGLE_WORD_NAME_MARKERS = {
+    "name", "names", "mr", "mrs", "ms", "mx", "dr", "prof", "sir", "miss",
+    "madam", "contact", "author", "sincerely", "regards", "aka",
+}
+
+# Words that must never start a document-header name line (section headings,
+# greetings, memo headers): "Job Description" is not a person.
+_HEADER_FIRST_WORDS = {
+    "dear", "hello", "hi", "hey", "attention", "attn", "to", "from", "re",
+    "subject", "regarding", "date", "cc", "bcc", "page", "encl", "attachment",
+    "the", "a", "an", "job", "title", "position", "resume", "curriculum", "vitae",
+    "cv", "invoice", "report", "proposal", "contract", "statement", "application",
+    "welcome", "notice", "summary", "project", "plan", "policy", "memo", "letter",
+}
+
+
+def _has_name_marker(text: str, start: int) -> bool:
+    """True when a strong name marker ("Name:", "Regards,", "Mr.", "Prepared by:",
+    "Contact", ...) immediately precedes the span."""
+    window = text[max(0, start - 60):start]
+    return bool(_NAME_MARKER_RE.search(window))
+
+
 def _verify_person_span(text: str, start: int, end: int) -> bool:
     """Accept an NER PERSON hit only if it reads like a real person name:
     purely alphabetic title-cased tokens (single-letter initials allowed) with
-    at least one token from the common-name list."""
+    at least one token from the common-name list, or a strong name marker
+    immediately before the span ("Name: Vedit Agrawal", "Regards, ...").
+    Everything else — brand names, product names, random capitalized nouns —
+    is rejected."""
     tokens = text[start:end].split()
     if not tokens:
         return False
@@ -213,7 +263,9 @@ def _verify_person_span(text: str, start: int, end: int) -> bool:
         if not _PERSON_TOKEN_RE.match(tok):
             return False
     known = _known_person_names()
-    return any(tok.rstrip(".") in known for tok in tokens)
+    if any(tok.rstrip(".") in known for tok in tokens):
+        return True
+    return _has_name_marker(text, start)
 
 
 def _filter_person_results(text: str, results) -> list:
@@ -227,7 +279,64 @@ def _filter_person_results(text: str, results) -> list:
     ]
 
 
-def detect_and_mask_text(text: str, active_entities: list[str], masking_style: str = "LABEL", custom_patterns: Optional[list] = None, language: Optional[str] = None) -> dict:
+def name_line_tokens_ok(words: list) -> bool:
+    """True when a standalone line looks like a person-name header: 2-4
+    title-cased alphabetic words (a trailing period allowed), first word not a
+    known section/greeting heading."""
+    if not (2 <= len(words) <= 4):
+        return False
+    tokens = [w.rstrip(".") for w in words]
+    if not all(_PERSON_TOKEN_RE.match(t) for t in tokens):
+        return False
+    return tokens[0].lower() not in _HEADER_FIRST_WORDS
+
+
+def _find_name_spans(text: str, name_lines=None) -> list:
+    """Recover person names the NER missed, without hurting precision.
+
+    Two sources, both verified:
+
+    - Capitalized runs of 2-4 words in a strong name-marker context
+      ("Name: Vedit Agrawal", "Prepared by: Sarah Johnson") — the NER
+      frequently misses these but the marker is unambiguous.
+    - Document header name lines supplied by the document handlers (offsets of
+      a first-line name whose following lines carry contact info) — this is
+      how "Vedit Agrawal" on a resume's first line gets caught.
+    """
+    from presidio_analyzer import RecognizerResult
+    results = []
+    for m in _NAME_RUN_RE.finditer(text):
+        tokens = m.group().split()
+        if not (2 <= len(tokens) <= 4):
+            continue
+        start = m.start()
+        if tokens[0].rstrip(".").lower() in _SINGLE_WORD_NAME_MARKERS:
+            # The run begins with the marker itself ("Contact John Smith"):
+            # the span covers only the actual name, and (to keep precision)
+            # the remainder must contain a known name — "Contact Support Team"
+            # stays unflagged because "Support Team" is not a common name.
+            offset = len(tokens[0]) + 1
+            tokens = tokens[1:]
+            start += offset
+            if not (2 <= len(tokens) <= 4):
+                continue
+            known = _known_person_names()
+            if not any(t.rstrip(".") in known for t in tokens):
+                continue
+        if not _verify_person_span(text, start, m.end()):
+            continue
+        results.append(RecognizerResult(entity_type="PERSON", start=start, end=m.end(), score=0.9))
+    if name_lines:
+        for s, e in name_lines:
+            if e <= s:
+                continue
+            words = text[s:e].split()
+            if name_line_tokens_ok(words):
+                results.append(RecognizerResult(entity_type="PERSON", start=s, end=e, score=0.9))
+    return results
+
+
+def detect_and_mask_text(text: str, active_entities: list[str], masking_style: str = "LABEL", custom_patterns: Optional[list] = None, language: Optional[str] = None, name_lines: Optional[list] = None) -> dict:
     """
     Use Presidio to analyze and mask text based on active policies and custom regex.
     """
@@ -242,6 +351,8 @@ def detect_and_mask_text(text: str, active_entities: list[str], masking_style: s
     
     # Add custom regex results
     results.extend(_apply_custom_regex(text, custom_patterns))
+    if active_entities and "PERSON" in active_entities:
+        results.extend(_find_name_spans(text, name_lines))
     
     # CRITICAL FIX: Presidio Anonymizer crashes if there are overlapping entities
     results = _remove_overlaps(results)
@@ -276,7 +387,7 @@ def detect_and_mask_text(text: str, active_entities: list[str], masking_style: s
         "redacted": anonymized_result.text
     }
 
-def detect_raw(text: str, active_entities: list[str], custom_patterns: Optional[list] = None, language: Optional[str] = None):
+def detect_raw(text: str, active_entities: list[str], custom_patterns: Optional[list] = None, language: Optional[str] = None, name_lines: Optional[list] = None):
     if not text.strip():
         return []
 
@@ -285,6 +396,8 @@ def detect_raw(text: str, active_entities: list[str], custom_patterns: Optional[
     results = _get_analyzer().analyze(text=text, entities=active_entities, language=language) if active_entities else []
     results = _filter_person_results(text, results)
     results.extend(_apply_custom_regex(text, custom_patterns))
+    if active_entities and "PERSON" in active_entities:
+        results.extend(_find_name_spans(text, name_lines))
     # Remove overlaps to prevent downstream processing errors
     return _remove_overlaps(results)
 
@@ -301,7 +414,7 @@ def _get_faker(language: str):
         _faker_instances[locale] = Faker(locale)
     return _faker_instances[locale]
 
-def detect_and_synthesize_text(text: str, active_entities: list[str], custom_patterns: Optional[list] = None, language: Optional[str] = None) -> dict:
+def detect_and_synthesize_text(text: str, active_entities: list[str], custom_patterns: Optional[list] = None, language: Optional[str] = None, name_lines: Optional[list] = None) -> dict:
     """
     Analyzes text and replaces PII with statistically realistic synthetic data using Faker.
     Used for AI Training Data Sanitization to preserve utility.
@@ -314,6 +427,8 @@ def detect_and_synthesize_text(text: str, active_entities: list[str], custom_pat
     results = _get_analyzer().analyze(text=text, entities=active_entities, language=language) if active_entities else []
     results = _filter_person_results(text, results)
     results.extend(_apply_custom_regex(text, custom_patterns))
+    if active_entities and "PERSON" in active_entities:
+        results.extend(_find_name_spans(text, name_lines))
     results = _remove_overlaps(results)
     
     if not results:

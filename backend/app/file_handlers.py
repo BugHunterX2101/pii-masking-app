@@ -7,6 +7,45 @@ from docx import Document
 
 from backend.app import pii_engine
 
+
+# Contact signal for the document-header name rule: an email, or a phone-like
+# string of 7+ digits. A resume's first line ("Vedit Agrawal") is only treated
+# as a person name when the following lines actually carry contact info —
+# "Job Description" headers and cover-letter salutations never match.
+_CONTACT_IN_LINE_RE = re.compile(
+    r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}"
+    r"|(?:\+?\d[\d\s\-().]{6,}\d)"
+)
+
+
+def _pdf_name_lines(raw_words, word_spans) -> list:
+    """Header-block name detection for native-text PDFs.
+
+    The first line of the document, if it reads like a person name (2-4
+    title-cased words) and the next up-to-3 lines carry an email or phone, is
+    returned as a PERSON candidate span. This is how a resume's name line is
+    caught even though spaCy's NER misses it."""
+    groups = {}
+    order = []
+    for wi, w in enumerate(raw_words):
+        key = (w[5], w[6])  # (block, line)
+        if key not in groups:
+            groups[key] = []
+            order.append(key)
+        groups[key].append(wi)
+    if not order:
+        return []
+    first = groups[order[0]]
+    if not pii_engine.name_line_tokens_ok([raw_words[wi][4] for wi in first]):
+        return []
+    contact_words = []
+    for key in order[1:4]:
+        for wi in groups[key]:
+            contact_words.append(raw_words[wi][4])
+    if not _CONTACT_IN_LINE_RE.search(" ".join(contact_words)):
+        return []
+    return [(word_spans[first[0]][0], word_spans[first[-1]][1])]
+
 # ---------------------------------------------------------------------------
 # Shared helpers
 # ---------------------------------------------------------------------------
@@ -100,7 +139,8 @@ def process_pdf(file_bytes: bytes, active_entities: list[str], detect_raw_fn, cu
                 continue
 
             language = pii_engine.resolve_language(page_text)
-            results = detect_raw_fn(page_text, active_entities, custom_patterns, language=language)
+            name_lines = _pdf_name_lines(raw_words, word_spans) if page.number == 0 else []
+            results = detect_raw_fn(page_text, active_entities, custom_patterns, language=language, name_lines=name_lines)
             if not results:
                 continue
 
@@ -207,12 +247,12 @@ def _apply_spans_to_paragraph(para, spans, masking_style):
         run.text = text
 
 
-def _process_docx_paragraph(para, active_entities, detect_raw_fn, masking_style, custom_patterns, report, report_label):
+def _process_docx_paragraph(para, active_entities, detect_raw_fn, masking_style, custom_patterns, report, report_label, name_lines=None):
     text = _para_text(para)
     if not text.strip():
         return
     language = pii_engine.resolve_language(text)
-    results = detect_raw_fn(text, active_entities, custom_patterns, language=language)
+    results = detect_raw_fn(text, active_entities, custom_patterns, language=language, name_lines=name_lines)
     if not results:
         return
     spans = [(r.start, r.end, r.entity_type) for r in results]
@@ -224,8 +264,19 @@ def process_docx(file_bytes: bytes, active_entities: list[str], detect_raw_fn, m
     doc = Document(io.BytesIO(file_bytes))
     report = []
 
-    for para in doc.paragraphs:
-        _process_docx_paragraph(para, active_entities, detect_raw_fn, masking_style, custom_patterns, report, "DOCX Paragraph")
+    paragraphs = list(doc.paragraphs)
+    # Header-block name rule: first paragraph looks like a name and the next
+    # paragraphs carry contact info -> PERSON candidate for that paragraph.
+    first_name_lines = None
+    if paragraphs:
+        if pii_engine.name_line_tokens_ok(paragraphs[0].text.split()):
+            contact = " ".join(p.text for p in paragraphs[1:4])
+            if _CONTACT_IN_LINE_RE.search(contact):
+                first_name_lines = [(0, len(paragraphs[0].text))]
+
+    for idx, para in enumerate(paragraphs):
+        _process_docx_paragraph(para, active_entities, detect_raw_fn, masking_style, custom_patterns, report, "DOCX Paragraph",
+                                name_lines=first_name_lines if idx == 0 else None)
 
     for table in doc.tables:
         for row in table.rows:
@@ -307,7 +358,14 @@ def mask_pii_in_image(image_bytes: bytes, active_entities: list[str], detect_raw
     full_text = "\n".join(ln["text"] for ln in lines)
 
     language = pii_engine.resolve_language(full_text)
-    results = detect_raw_fn(full_text, active_entities, custom_patterns, language=language)
+    name_lines = []
+    if lines:
+        if pii_engine.name_line_tokens_ok(lines[0]["text"].split()):
+            contact = " ".join(ln["text"] for ln in lines[1:4])
+            if _CONTACT_IN_LINE_RE.search(contact):
+                s, e = line_windows[0]
+                name_lines.append((s, e))
+    results = detect_raw_fn(full_text, active_entities, custom_patterns, language=language, name_lines=name_lines)
     if not results:
         return image_bytes, []
 

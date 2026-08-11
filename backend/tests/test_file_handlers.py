@@ -160,6 +160,72 @@ def test_image_masks_email_but_not_unrelated_occurrences():
     assert "example.com" in text_after
 
 
+def test_pdf_masks_header_name_line():
+    """The resume-header case: the first line reads like a name and the next
+    lines carry contact info, so it must be redacted as PERSON even though
+    spaCy's NER misses rare names — while the tech words around it survive.
+    """
+    import fitz
+    pdf = _make_pdf([
+        "Vedit Agrawal",
+        "veditagrawal21@gmail.com | +91 8000809591 | linkedin.com/in/vedit-agrawal",
+        "Education",
+        "BMS College of Engineering, Bengaluru, India",
+        "Monitoring using Prometheus and Grafana",
+        "Built a B2B platform with Express.js and Groq",
+    ])
+    entities = ["PERSON", "EMAIL_ADDRESS", "PHONE_NUMBER", "ICD10_CODE", "EU_VAT"]
+    out_bytes, report = file_handlers.process_pdf(pdf, entities, pii_engine.detect_raw)
+
+    with fitz.open(stream=out_bytes, filetype="pdf") as doc:
+        text = doc[0].get_text()
+
+    for w in ["Vedit", "Agrawal", "veditagrawal21@gmail.com", "8000809591"]:
+        assert w not in text, f"{w!r} should be redacted"
+    for w in ["Prometheus", "Grafana", "B2B", "Express.js", "Groq", "Bengaluru", "Education"]:
+        assert w in text, f"{w!r} should survive"
+    types = sorted({t for item in report for t in item.get("pii_types", [])})
+    assert "PERSON" in types, f"PERSON missing from report: {types}"
+
+
+def test_pdf_does_not_flag_document_title_first_line():
+    """\"Job Description\" as the first line (no contact info) must not be
+    treated as a person name."""
+    import fitz
+    pdf = _make_pdf([
+        "Job Description",
+        "Software Development Engineering Intern",
+        "We are hiring an intern for summer 2026.",
+    ])
+    out_bytes, report = file_handlers.process_pdf(pdf, ["PERSON"], pii_engine.detect_raw)
+
+    with fitz.open(stream=out_bytes, filetype="pdf") as doc:
+        text = doc[0].get_text()
+    assert "Job" in text and "Description" in text
+    assert all("PERSON" not in item.get("pii_types", []) for item in report), report
+
+
+def test_docx_masks_header_name_paragraph():
+    """DOCX: the first paragraph is a name and the next ones carry contact
+    info, so it is redacted while later prose stays intact."""
+    import io
+    from docx import Document
+    doc = Document()
+    doc.add_paragraph("Vedit Agrawal")
+    doc.add_paragraph("veditagrawal21@gmail.com | +91 8000809591")
+    doc.add_paragraph("Monitoring using Prometheus and Grafana")
+    buf = io.BytesIO()
+    doc.save(buf)
+
+    out, report = file_handlers.process_docx(
+        buf.getvalue(), ["PERSON", "EMAIL_ADDRESS", "PHONE_NUMBER"], pii_engine.detect_raw
+    )
+    paras = [p.text for p in Document(io.BytesIO(out)).paragraphs]
+    assert "Vedit" not in paras[0] and "Agrawal" not in paras[0]
+    assert "veditagrawal21@gmail.com" not in paras[1] and "8000809591" not in paras[1]
+    assert "Prometheus" in paras[2] and "Grafana" in paras[2]
+
+
 def _docx_bytes(doc):
     buf = io.BytesIO()
     doc.save(buf)

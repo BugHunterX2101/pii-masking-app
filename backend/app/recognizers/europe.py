@@ -33,26 +33,48 @@ _EU_VAT_SPACED_RE = rf"\b(?:{_EU_VAT_CODES})(?=[A-Z0-9 -]*[0-9])[ -][A-Z0-9]{{1,
 _VAT_SEPARATOR_RE = re.compile(r"[\s-]+")
 
 
-def _vat_validator(match_text: str) -> bool:
-    """Validate a candidate VAT match, allowing for trailing words.
+def _vat_prefix_end(match_text: str) -> int:
+    """Return the end offset (within the match) of the verified VAT prefix.
 
-    The spaced pattern can greedily swallow a following word ("DE 136 695 976
-    on the"). If the full match fails its checksum, retry each prefix at a
-    separator boundary (longest first) so the genuine VAT still validates.
+    The patterns can absorb trailing characters beyond the real VAT:
+
+    - the spaced form can swallow a following uppercase word ("DE 136 695 976
+      S");
+    - the compact form can be glued to trailing letters ("ATU57194903X").
+
+    Try the full string first, then prefixes at separator boundaries (longest
+    first), then the compact form with up to 4 trailing letters trimmed.
+    Returns 0 when nothing validates, so callers can drop the match.
     """
     if is_valid_vat(match_text):
-        return True
+        return len(match_text)
     parts = _VAT_SEPARATOR_RE.split(match_text)
     for i in range(len(parts) - 1, 0, -1):
         if is_valid_vat("".join(parts[:i])):
-            return True
-    return False
+            # Original character length: token lengths + the separators between.
+            return sum(len(p) for p in parts[:i]) + (i - 1)
+    trimmed = re.sub(r"[A-Z]+$", "", match_text)
+    if trimmed != match_text and len(match_text) - len(trimmed) <= 4 and is_valid_vat(trimmed):
+        return len(trimmed)
+    return 0
+
+
+def _vat_validator(match_text: str) -> bool:
+    return _vat_prefix_end(match_text) > 0
+
+
+def _vat_span_adjuster(match_text: str):
+    """Span trims to the verified prefix so swallowed trailing words are not
+    blacked out (e.g. "DE 136 695 976 S" masks only the VAT, not the "S")."""
+    end = _vat_prefix_end(match_text)
+    return end if end > 0 else None
 
 
 vat_pattern = Pattern(name="vat_pattern", regex=_EU_VAT_COMPACT_RE, score=0.5)
 vat_spaced_pattern = Pattern(name="vat_spaced_pattern", regex=_EU_VAT_SPACED_RE, score=0.5)
 vat_recognizer = ValidatedPatternRecognizer(
     validator=_vat_validator,
+    span_adjuster=_vat_span_adjuster,
     supported_entity="EU_VAT",
     patterns=[vat_pattern, vat_spaced_pattern],
 )

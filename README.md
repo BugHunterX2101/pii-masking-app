@@ -406,7 +406,7 @@ Regex matches alone produce false positives — random strings that merely *look
 |---|---|
 | `AADHAAR` | Verhoeff check digit (official UIDAI algorithm) |
 | `EU_IBAN` | ISO 13616 mod-97 check (reference number `GB29 NWBK 6016 1331 9268 19`) |
-| `EU_VAT` | Per-country official checksums (mod-11 weighted, mod-97, CIF, ISO 7064) covering every EU member state plus UK — including the letter-body formats `ATU…` (Austria), CIF (Spain), `IE…F` (Ireland) and `NL…B..` (Netherlands); CZ/SK are format-validated (no checksum exists by law) |
+| `EU_VAT` | Per-country official checksums (mod-11 weighted, mod-97, CIF, ISO 7064) covering every EU member state plus UK — including the letter-body formats `ATU…` (Austria), CIF (Spain), `IE…F` (Ireland) and `NL…B..` (Netherlands); CZ/SK are format-validated (no checksum exists by law). Spans are trimmed to the verified prefix, so a spaced VAT (`FR 61 954 506 077`) never swallows a trailing word |
 | `BR_CPF` / `BR_CNPJ` | Two mod-11 check digits |
 | `PROVIDER_NPI` | CMS algorithm (80840 prefix + Luhn) |
 | `US_ROUTING_NUMBER` | ABA mod-10 with 3-7-1 weights |
@@ -415,7 +415,13 @@ Regex matches alone produce false positives — random strings that merely *look
 
 Validated matches are promoted to full confidence (1.0); identifiers that fail their checksum are dropped from the regional entity (they may still be caught by a generic class such as `PHONE_NUMBER`). Overlapping detections are resolved score-aware, keeping the strongest match per span.
 
-**`PERSON` hits are verified against a known-name list.** The spaCy NER hallucinates person names for ordinary words — on a real resume it tagged `Prometheus`, `Java`, `NumPy`, `Linux`, `Streamlit`, `Express.js`, and even the merged `Chapter Bengaluru` as PERSON with a 0.85 score, while missing the actual name on the page. Every NER `PERSON` hit must therefore contain at least one token from a list of ~1,700 common given/family names (Faker's en_US provider, already a dependency); anything else is dropped. A name not in the list is deliberately not flagged — the same precision-first stance Microsoft recommends for production Presidio deployments.
+**`PERSON` hits are verified, not guessed.** The spaCy NER hallucinates person names for ordinary words — on a real resume it tagged `Prometheus`, `Java`, `NumPy`, `Linux`, `Streamlit`, `Express.js`, and even the merged `Chapter Bengaluru` as PERSON with a 0.85 score, while missing the actual name on the page. Every NER `PERSON` hit must therefore pass one of three verification gates before it is masked:
+
+1. **Known-name list** — at least one token is a common given/family name (Faker's en_US provider, ~1,700 names, already a dependency);
+2. **Strong marker context** — a name-adjacent marker immediately precedes the span (`Name:`, `Contact:`, `From:`, `Mr`, `Dr`, `Regards,`, `Prepared by:`, `known as`, …). This is how uncommon names like `Vedit Agrawal` are recovered in forms, emails, and signatures;
+3. **Document header name line** — the document's first line reads like a name (2-4 title-cased words) **and** the following lines carry contact info (email/phone). This is how a resume's name line is caught even though the NER misses it — while a `Job Description` header or a `Dear Hiring Team` salutation is never flagged.
+
+Unverified capitalized words are dropped, and marker words themselves are never masked (`Contact John Smith` redacts only `John Smith`).
 
 Regional recognizers live in `backend/app/recognizers/` and load automatically at startup; all 16 shipped entities are active by default so no PII class is silently missed, and every entity can be **dynamically toggled on/off** by admins via the policy dashboard without redeploying. Custom regex patterns can also be added at runtime.
 
@@ -716,7 +722,7 @@ pii-masking-app/
 | **Zero-Trust RBAC** | Role re-evaluated from env var on every login; database never the source of truth |
 | **Live UI** | Real-time PII heatmap, command palette (Ctrl+K), toast notifications, animated canvas |
 | **Exact Redaction** | Word-level PDF, run-level DOCX (formatting preserved), span-exact image masking — no over- or under-redaction |
-| **Verified Accuracy** | 39 automated tests: check-digit validation, verified-name PERSON gate, email policy, multilingual routing, and masked-document guarantees |
+| **Verified Accuracy** | 46 automated tests: check-digit validation, verified-name PERSON gate (known-name / marker / header-line), email policy, multilingual routing, and masked-document guarantees |
 
 <br/>
 

@@ -420,3 +420,60 @@ def test_icd10_requires_two_digits():
     assert "F41" in flagged, f"F41 should flag: {hits}"
     assert "B2B" not in flagged, f"B2B must not flag: {hits}"
     assert "C3PO" not in flagged, f"C3PO must not flag: {hits}"
+
+
+# ---------------------------------------------------------------------------
+# Name recall without false positives (marker contexts + header name lines)
+# ---------------------------------------------------------------------------
+def test_person_gate_accepts_marker_context_names():
+    """Names the NER misses but that follow a strong marker are recovered.
+    This is what fixes the "Vedit Agrawal not flagged" trade-off: the name is
+    not in the common-name list, but the marker context verifies it."""
+    for text, expected in [
+        ("Name: Vedit Agrawal, Software Engineer", "Vedit Agrawal"),
+        ("Regards, Vedit Agrawal", "Vedit Agrawal"),
+        ("Prepared by: Sarah Johnson", "Sarah Johnson"),
+        ("Best regards, Vedit Agrawal", "Vedit Agrawal"),
+        ("From: Vedit Agrawal <vedit@x.com>", "Vedit Agrawal"),
+    ]:
+        hits = _hit_types(text, ["PERSON"])
+        flagged = {snippet for _, snippet in hits}
+        assert expected in flagged, f"{expected!r} missing in {hits}"
+
+
+def test_person_span_never_includes_the_marker_word():
+    """"Contact John Smith" must flag only "John Smith", not the marker."""
+    hits = _hit_types("Contact John Smith at john@x.com", ["PERSON"])
+    snippets = {snippet for _, snippet in hits}
+    assert "John Smith" in snippets, f"John Smith missing: {hits}"
+    assert not any(s.startswith("Contact") for s in snippets), f"marker leaked: {hits}"
+    # "Contact Support Team" is not a person — no common name in the run.
+    hits2 = _hit_types("Please contact Support Team for help", ["PERSON"])
+    assert hits2 == [], f"Support Team should not flag: {hits2}"
+
+
+def test_person_gate_still_rejects_unverified_words():
+    """The precision guarantee must hold: brand/product words stay unflagged
+    even in plausible sentences."""
+    for text in [
+        "monitoring using Prometheus and Keras Tuner",
+        "powered by Tailwind CSS and Streamlit",
+        "Dear CloudRaft Hiring Team,",
+        "BMS College of Engineering, Bengaluru India",
+    ]:
+        hits = _hit_types(text, ["PERSON"])
+        assert hits == [], f"unexpected PERSON hits for {text!r}: {hits}"
+
+
+def test_vat_spaced_span_trimmed_to_verified_prefix():
+    """The spaced VAT form must never over-mask a trailing uppercase word.
+    "DE 136 695 976 S" masks only the VAT; the " S" stays visible."""
+    text = "Ref DE 136 695 976 S here"
+    result = pii_engine.detect_and_mask_text(text, ["EU_VAT"], "BLACKOUT")
+    redacted = result["redacted"]
+    assert "DE 136 695 976" not in redacted
+    assert "S here" in redacted, f"trailing 'S' must survive: {redacted!r}"
+    assert "Ref" in redacted
+
+    glued = pii_engine.detect_and_mask_text("ATU57194903X end", ["EU_VAT"], "BLACKOUT")
+    assert "X end" in glued["redacted"], f"trailing letter must survive: {glued['redacted']!r}"
