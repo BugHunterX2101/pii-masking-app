@@ -1,6 +1,5 @@
 ---
 title: Enterprise Privacy Suite
-emoji: 🛡️
 colorFrom: blue
 colorTo: indigo
 sdk: docker
@@ -84,7 +83,7 @@ The detection engine supports **24 languages**. Each language uses a small spaCy
 | Eastern Europe | Polish, Russian, Ukrainian, Czech→*, Slovak→*, Bulgarian→*, Croatian, Slovenian, Macedonian, Lithuanian, Latvian→*, Estonian→*, Hungarian→*, Romanian |
 | Asia | Japanese, Chinese, Korean |
 
-> *Languages marked → are supported by the pipeline's language routing but fall back to the English NER model when a dedicated spaCy 3.7 model is unavailable; regex-backed PII detection (email, phone, Aadhaar, PAN, cards, ...) works in every language regardless.
+> *Languages marked → are detected by `langdetect` but have no dedicated spaCy 3.7 model, so their text is analyzed with the English NER model (the pipeline never errors on an unsupported code — it clamps to English). Regex-backed PII detection (email, phone, Aadhaar, PAN, cards, ...) works in every language regardless, because the regional recognizers are pure regex registered for all 24 languages.*
 
 This replaces the previous setup of eight ~500 MB `_lg` models loaded eagerly at startup (≈4 GB of downloads and RAM before the first request) with a ~90% smaller footprint, instant startup, and triple the language coverage. Languages are auto-detected with `langdetect` when not specified.
 
@@ -94,6 +93,18 @@ Large files (multi-page PDFs, high-res images) can take several seconds to proce
 - The Celery worker processes the document entirely in the background.
 - The React frontend **polls** `/api/tasks/{task_id}` every 2 seconds, rendering a live progress state.
 - On completion, the UI delivers the masked file to the user via a **secure S3 pre-signed URL** (expires in 1 hour).
+
+### Exact-Redaction Document Masking
+Redaction is **span-exact**: only the precise words Presidio flagged are removed — never the whole line, and never unrelated occurrences. Each file type uses a purpose-built strategy so the output is safe and looks professional:
+
+| File type | Strategy | What it guarantees |
+|---|---|---|
+| **PDF** (native text) | Word-level redaction from the page's extracted word boxes | PII split across lines is fully blacked out; a flagged word never damages words that merely *contain* it (flagging `John` leaves `Johnston` untouched) |
+| **DOCX** | Run-level replacement | Formatting (bold, italic, fonts) survives; headers and footers are scanned (they never were before); tables are covered |
+| **Images / scans** | Local OCR + per-word box redaction | Runs fully offline (no cloud API, no credentials); only OCR boxes intersecting a flagged span are blacked out — an email's `com` never blacks out a legitimate `example.com` elsewhere in the image |
+| **CSV / JSONL** | Row-by-row synthesis | Training data is sanitized with realistic Faker substitutes per language |
+
+Every handler reports what it actually redacted — if a detection ever maps to no box, it is reported as missed rather than silently claimed as masked. One language detection per document (not per paragraph) keeps large-file latency low.
 
 ### Zero-Trust Security Model
 - **Auth0 SSO**: Users authenticate via corporate identity providers (Microsoft Entra ID, Google Workspace, Okta). No passwords are stored in the application database.
@@ -141,7 +152,7 @@ end
 
 subgraph ASYNC [" Async Processing Layer"]
 Redis["Redis 8\nMessage Broker\n+ Result Backend"]
-Worker["Celery Worker\nProcess Pool (16 concurrent)"]
+Worker["Celery Worker\nBackground Workers"]
 end
 
 subgraph AI [" AI / ML Layer"]
@@ -208,11 +219,7 @@ DS --> Direct
 OCR --> TextBlocks["Text Annotations\n+ Bounding Boxes"]
 Direct --> Presidio
 Runs --> Presidio
-
 TextBlocks --> Presidio
-
-TextBlocks --> Presidio[" Microsoft Presidio\nNER Detection"]
-Direct --> Presidio
 
 Presidio --> Entities{{"PII Found?"}}
 
@@ -356,7 +363,7 @@ USERS ||--o{ AUDIT_LOGS : "generates"
 |-------|------------|---------|-----------------|
 | **Frontend** | React | 18 | Component-driven SPA, Auth0 SDK |
 | **UI** | Lucide React + Vanilla CSS | Latest | Zero dependency, glassmorphism dark mode |
-| **Fonts** | Outfit + Inter (Google Fonts) | Latest | Premium typographic hierarchy |
+| **Fonts** | Plus Jakarta Sans | Latest | Premium typographic hierarchy |
 | **Backend** | FastAPI | 0.110+ | Async-native Python, OpenAPI auto-docs |
 | **ASGI Server** | Uvicorn | Latest | Production-grade ASGI with hot-reload |
 | **Auth** | Auth0 (RS256 JWT) | — | Enterprise SSO; no password management |
@@ -367,9 +374,9 @@ USERS ||--o{ AUDIT_LOGS : "generates"
 | **Storage** | AWS S3 + Boto3 | Latest | Durable object storage; pre-signed URL support |
 | **OCR** | RapidOCR (ONNX) | 1.3 | Local OCR — offline, no credentials, no per-image network latency |
 | **NLP / NER** | Microsoft Presidio + SpaCy | 2.2 / 3.7 | Context-aware PII detection beyond regex |
-| **PDF** | PyMuPDF (fitz) | 1.24 | Fast, accurate PDF page rendering |
-| **Word** | python-docx | 1.1 | Native `.docx` manipulation |
-| **Image** | OpenCV | 4.9 | Bounding box redaction on images |
+| **PDF** | PyMuPDF (fitz) | 1.24 | Word-exact text extraction + redaction |
+| **Word** | python-docx | 1.1 | Run-level redaction that preserves formatting |
+| **Image** | RapidOCR + OpenCV | 1.3 / 4.x | Local OCR + span-exact box redaction |
 | **Container** | Docker + Supervisord | Latest | Multi-process single-container orchestration |
 | **CI/CD** | GitHub Actions | — | Automated deploy to Hugging Face on every push to `main` |
 
@@ -377,7 +384,7 @@ USERS ||--o{ AUDIT_LOGS : "generates"
 
 ## Supported PII Entity Types
 
-The Presidio NLP engine detects **20+ entity types** out of the box, with custom recognizers built for regional documents:
+Detection combines Presidio's built-in recognizers with **16 custom regional entity classes** shipped with the app (all active by default, all toggleable from the admin dashboard):
 
 | Category | Entities Detected |
 |---|---|
@@ -486,7 +493,18 @@ npm start
 # App available at http://localhost:3000
 ```
 
-### 5. Run via Docker (Single Command)
+### 5. Running the Test Suite
+```bash
+# Unit tests: check-digit validators, email policy, multilingual registry,
+# and the document-handler exact-redaction guarantees (35 tests)
+python -m pytest backend/tests -q
+
+# Frontend production build check
+cd frontend && npm run build
+```
+The CI pipeline (`.github/workflows/main.yml`) runs the same backend tests and a frontend build on every push and pull request — and only deploys to Hugging Face after both pass.
+
+### 6. Run via Docker (Single Command)
 ```bash
 docker build -t enterprise-privacy-suite .
 docker run -p 7860:7860 --env-file .env enterprise-privacy-suite
@@ -541,7 +559,7 @@ The single Docker container runs three processes managed by Supervisord:
 Container (Port 7860)
 ├── Redis 8          — in-process message broker and result backend
 ├── Uvicorn (FastAPI) — API server + serves React static build
-└── Celery Worker    — async document processing with 16 concurrent workers
+└── Celery Worker    — async document processing (concurrency defaults to CPU count)
 ```
 
 The React frontend is built during the Docker image build phase (`npm run build`) and served directly by FastAPI as static files. There is no separate frontend server.
@@ -653,7 +671,7 @@ pii-masking-app/
 │       ├── nlp_engine.py        # Lazy-loading multilingual spaCy engine (24 languages)
 │       ├── checksums.py         # Check-digit validators (Verhoeff, Luhn, mod-97, mod-11, ...)
 │       ├── email_verification.py# Verified-provider / disposable-domain / MX policy
-│       ├── file_handlers.py     # PDF (PyMuPDF) and Word (python-docx) processors
+│       ├── file_handlers.py     # PDF word-level, DOCX run-level, image RapidOCR processors
 │       ├── compliance_cert.py   # HIPAA compliance certificate generator
 │       ├── tests/               # Pytest suite (runs in CI without model downloads)
 │       └── recognizers/         # Custom regional PII recognizers
@@ -694,6 +712,8 @@ pii-masking-app/
 | **Enterprise-Ready** | RBAC, Audit Logs, Policy Management, Custom Regex, SSO — all production-grade |
 | **Zero-Trust RBAC** | Role re-evaluated from env var on every login; database never the source of truth |
 | **Live UI** | Real-time PII heatmap, command palette (Ctrl+K), toast notifications, animated canvas |
+| **Exact Redaction** | Word-level PDF, run-level DOCX (formatting preserved), span-exact image masking — no over- or under-redaction |
+| **Verified Accuracy** | 35 automated tests: check-digit validation, email policy, multilingual routing, and masked-document guarantees |
 
 <br/>
 
